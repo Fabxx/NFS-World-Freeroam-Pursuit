@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hpp;hxx</Extensions>
+    </Filter>
+    <Filter Include="third_party">
+      <UniqueIdentifier>{7B1B9E1E-6B2A-4B7C-9E0E-3E2C6F4E9A21}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="third_party\detours">
+      <UniqueIdentifier>{7B1B9E1E-6B2A-4B7C-9E0E-3E2C6F4E9A22}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\Logger.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Probe.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\CopProximityTriggerHook.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\VtableScan.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="third_party\detours\detours.h">
+      <Filter>third_party\detours</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Probe.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\CopProximityTriggerHook.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\VtableScan.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\detours\detours.cpp">
+      <Filter>third_party\detours</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\detours\modules.cpp">
+      <Filter>third_party\detours</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\detours\disasm.cpp">
+      <Filter>third_party\detours</Filter>
+    </ClCompile>
+    <ClCompile Include="third_party\detours\image.cpp">
+      <Filter>third_party\detours</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>
