@@ -55,7 +55,7 @@ namespace Mod::Trigger {
     }
 
     static DWORD WINAPI ThreadProc(LPVOID) {
-        bool armed = false, wasF9 = false, latched = false, haveLast = false;
+        bool armed = true, wasF9 = true, latched = false, haveLast = false;
 #ifdef _DEBUG
         bool wasF7 = false;
 #endif
