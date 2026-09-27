@@ -58,10 +58,8 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <!-- __try/__except (SEH) used throughout for safe memory reads/writes -->
+      <!-- SEH (__try/__except) guards every read/call into game memory -->
       <ExceptionHandling>Async</ExceptionHandling>
-      <!-- Detours source is vendored under third_party\detours and compiled
-           directly into this DLL; no external lib/include folder needed. -->
       <AdditionalIncludeDirectories>third_party\detours;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -90,17 +88,32 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClInclude Include="src\Logger.h" />
-    <ClInclude Include="src\Probe.h" />
-    <ClInclude Include="src\CopProximityTriggerHook.h" />
-    <ClInclude Include="src\VtableScan.h" />
+    <ClInclude Include="src\Game.h" />
+    <ClInclude Include="src\Hooks.h" />
+    <ClInclude Include="src\Log.h" />
+    <ClInclude Include="src\MapIcons.h" />
+    <ClInclude Include="src\MarkerFx.h" />
+    <ClInclude Include="src\Music.h" />
+    <ClInclude Include="src\Pursuit.h" />
+    <ClInclude Include="src\Results.h" />
+    <None Include="src\ScriptBindings.inc" />
+    <ClInclude Include="src\Trigger.h" />
     <ClInclude Include="third_party\detours\detours.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp" />
-    <ClCompile Include="src\Probe.cpp" />
-    <ClCompile Include="src\CopProximityTriggerHook.cpp" />
-    <ClCompile Include="src\VtableScan.cpp" />
+    <ClCompile Include="src\DebugEvent.cpp" />
+    <ClCompile Include="src\Game.cpp" />
+    <ClCompile Include="src\Hooks.cpp" />
+    <ClCompile Include="src\Log.cpp" />
+    <ClCompile Include="src\MapIcons.cpp" />
+    <ClCompile Include="src\MarkerFx.cpp" />
+    <ClCompile Include="src\MapProbe.cpp" />
+    <ClCompile Include="src\ScriptProbe.cpp" />
+    <ClCompile Include="src\Music.cpp" />
+    <ClCompile Include="src\Pursuit.cpp" />
+    <ClCompile Include="src\Results.cpp" />
+    <ClCompile Include="src\Trigger.cpp" />
     <!-- Vendored Detours (MIT license, see third_party\detours\LICENSE),
          compiled straight into this DLL instead of a separate .lib. -->
     <ClCompile Include="third_party\detours\detours.cpp">

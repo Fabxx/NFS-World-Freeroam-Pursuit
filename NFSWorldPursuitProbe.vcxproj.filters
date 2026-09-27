@@ -3,60 +3,97 @@
   <ItemGroup>
     <Filter Include="Source Files">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx</Extensions>
     </Filter>
     <Filter Include="Header Files">
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hpp;hxx</Extensions>
     </Filter>
-    <Filter Include="third_party">
-      <UniqueIdentifier>{7B1B9E1E-6B2A-4B7C-9E0E-3E2C6F4E9A21}</UniqueIdentifier>
-    </Filter>
-    <Filter Include="third_party\detours">
-      <UniqueIdentifier>{7B1B9E1E-6B2A-4B7C-9E0E-3E2C6F4E9A22}</UniqueIdentifier>
+    <Filter Include="Detours">
+      <UniqueIdentifier>{1B2C3D4E-5F60-4718-9A2B-3C4D5E6F7A8B}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\Logger.h">
+    <ClInclude Include="src\Game.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\Probe.h">
+    <ClInclude Include="src\Hooks.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\CopProximityTriggerHook.h">
+    <ClInclude Include="src\Log.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\VtableScan.h">
+    <ClInclude Include="src\MapIcons.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\MarkerFx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Music.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Pursuit.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Results.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Trigger.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="third_party\detours\detours.h">
-      <Filter>third_party\detours</Filter>
+      <Filter>Detours</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\Probe.cpp">
+    <ClCompile Include="src\DebugEvent.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\CopProximityTriggerHook.cpp">
+    <ClCompile Include="src\Game.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\VtableScan.cpp">
+    <ClCompile Include="src\Hooks.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Log.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\MapIcons.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\MarkerFx.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\MapProbe.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ScriptProbe.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Music.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Pursuit.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Results.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Trigger.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="third_party\detours\detours.cpp">
-      <Filter>third_party\detours</Filter>
+      <Filter>Detours</Filter>
     </ClCompile>
     <ClCompile Include="third_party\detours\modules.cpp">
-      <Filter>third_party\detours</Filter>
+      <Filter>Detours</Filter>
     </ClCompile>
     <ClCompile Include="third_party\detours\disasm.cpp">
-      <Filter>third_party\detours</Filter>
+      <Filter>Detours</Filter>
     </ClCompile>
     <ClCompile Include="third_party\detours\image.cpp">
-      <Filter>third_party\detours</Filter>
+      <Filter>Detours</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
