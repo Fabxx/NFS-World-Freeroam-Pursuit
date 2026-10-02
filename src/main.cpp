@@ -1,4 +1,4 @@
-// NFSWorldPursuitProbe: F9 arms the mod, ramming a cop in freeroam starts a pursuit like event 385.
+// NFSWorldPursuitProbe: with Options > Gameplay > Freeroam Pursuits ON, ramming a cop in freeroam starts a pursuit like event 385.
 #include <windows.h>
 #include "Hooks.h"
 #include "Music.h"
@@ -9,6 +9,7 @@
 #include "SpotFx.h"
 #include "MarkerFx.h"
 #include "Trigger.h"
+#include "Options.h"
 #include "Log.h"
 
 static bool g_running = false;
@@ -29,6 +30,7 @@ static DWORD WINAPI InitThread(LPVOID) {
     Mod::Guard::Install();
     Mod::SpotFx::Install();
     Mod::MarkerFx::Install();
+    Mod::Options::Install();
     Mod::Trigger::Start();
     return 0;
 }
@@ -51,6 +53,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         if (!g_running) return TRUE;
         if (reserved == nullptr) {
             Mod::Trigger::Stop(true);
+            Mod::Options::Remove();
             Mod::MarkerFx::Remove();
             Mod::SpotFx::Remove();
             Mod::Guard::Remove();

@@ -1,9 +1,10 @@
-// Worker thread: F9 toggle and cop-hit detection.
+// Worker thread: cop-hit detection (armed by Options > Gameplay > Freeroam Pursuits).
 #include "Trigger.h"
 #include "Game.h"
 #include "Hooks.h"
 #include "Pursuit.h"
 #include "Log.h"
+#include "Options.h"
 #include <atomic>
 #include <cmath>
 
@@ -54,7 +55,7 @@ namespace Mod::Trigger {
     }
 
     static DWORD WINAPI ThreadProc(LPVOID) {
-        bool armed = false, wasF9 = false, latched = false, haveLast = false;
+        bool latched = false, haveLast = false;
 #ifdef _DEBUG
         bool wasF7 = false;
 #endif
@@ -65,19 +66,12 @@ namespace Mod::Trigger {
             Sleep(kPollMs);
             ResolveGameThread();
 
-            bool f9 = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
-            if (f9 && !wasF9 && GameHasFocus()) {
-                armed = !armed;
-                latched = false;
-                LOG("[trigger] F9: %s", armed ? "ARMED" : "disarmed");
-            }
-            wasF9 = f9;
 #ifdef _DEBUG
             bool f7 = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
             if (f7 && !wasF7 && GameHasFocus()) Log::LaunchTestEvent();
             wasF7 = f7;
 #endif
-            if (!armed) { haveLast = false; continue; }
+            if (!Options::Armed()) { haveLast = false; latched = false; continue; }
 
             ULONGLONG now = GetTickCount64();
             float dist = 0.0f;

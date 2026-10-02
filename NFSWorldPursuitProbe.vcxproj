@@ -97,6 +97,7 @@
     <ClInclude Include="src\Stats.h" />
     <ClInclude Include="src\Guard.h" />
     <ClInclude Include="src\SpotFx.h" />
+    <ClInclude Include="src\Options.h" />
     <ClInclude Include="src\Features.h" />
     <ClInclude Include="src\Pursuit.h" />
     <ClInclude Include="src\Results.h" />
@@ -115,6 +116,7 @@
     <ClCompile Include="src\Stats.cpp" />
     <ClCompile Include="src\Guard.cpp" />
     <ClCompile Include="src\SpotFx.cpp" />
+    <ClCompile Include="src\Options.cpp" />
     <ClCompile Include="src\Features.cpp" />
     <ClCompile Include="src\Pursuit.cpp" />
     <ClCompile Include="src\Results.cpp" />

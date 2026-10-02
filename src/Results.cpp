@@ -333,7 +333,7 @@ namespace Mod::Results {
             *F32(ent, E::Heat) = 1.0f;
             e[E::Infractions / 4] = 0;
             *F32(ent, E::LongestJump) = 0.0f;
-            e[E::RoadBlocks / 4] = 0;
+            e[E::RoadBlocks / 4] = Features::On("roadblockhits") ? Pursuit::RoadblocksDodged() : 0;
             e[E::SpikeStrips / 4] = 0;
             *F32(ent, E::TopSpeed) = 0.0f;
         }

@@ -11,6 +11,7 @@ namespace Mod::Pursuit {
 
     bool InResultsWindow();
     bool IsActive();
+    uint32_t RoadblocksDodged();
 
     struct Stats { ULONGLONG startMs; ULONGLONG endMs; uint32_t maxCops; bool busted; float heat; };
     Stats GetStats();

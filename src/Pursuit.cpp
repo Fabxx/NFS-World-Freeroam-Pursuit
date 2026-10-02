@@ -3,6 +3,7 @@
 #include "Game.h"
 #include "Hooks.h"
 #include "Music.h"
+#include "Options.h"
 #include "Features.h"
 #include "Results.h"
 #include "Guard.h"
@@ -363,6 +364,76 @@ namespace Mod::Pursuit {
         return g_origRoadblockAdd(roadblock, vehicle);
     }
 
+    // Roadblocks (copmgr list 0xCC6A44): the game counts a roadblock as dodged when the player crosses its
+    // line (byte +104 set, "Dodged" message), even after smashing into it. A roadblock touched by the
+    // player just before is marked as passed first, so it is not reported nor counted as dodged.
+    constexpr uint32_t kRoadblockUpdate = 0x899080;
+    constexpr uint32_t kRoadblockList = 0xCC6A44, kRoadblockCount = 0xCC6A4C;
+    constexpr uint32_t kListenerPos = 0xD77200;
+    constexpr ULONGLONG kRoadblockHitMs = 400;
+    constexpr float kRoadblockHitRadius = 15.0f;
+    constexpr int kMaxRoadblocks = 32;
+    static volatile LONG g_rbDodged = 0;
+    using RoadblockUpdate_t = void*(__thiscall*)(void*, float);
+    static RoadblockUpdate_t g_origRoadblockUpdate = nullptr;
+
+    static bool RoadblockPassed(uint32_t rb, bool& passed) {
+        uint32_t w = 0;
+        if (!ReadU32(rb + 104, w)) return false;
+        passed = (w & 0xFF) != 0;
+        return true;
+    }
+
+    static int Roadblocks(uint32_t* out) {
+        uint32_t list = 0, count = 0;
+        if (!ReadU32(Addr(kRoadblockList), list) || !ReadU32(Addr(kRoadblockCount), count) || !list) return 0;
+        int n = 0;
+        for (uint32_t i = 0; i < count && n < kMaxRoadblocks; ++i) if (ReadU32(list + 4 * i, out[n]) && out[n]) ++n;
+        return n;
+    }
+
+    static bool NearPlayer(uint32_t rb) {
+        uint32_t lp = 0, p[3] = {}, r[3] = {};
+        if (!ReadU32(Addr(kListenerPos), lp) || !lp) return false;
+        for (int k = 0; k < 3; ++k) if (!ReadU32(lp + 80 + 4 * k, p[k]) || !ReadU32(rb + 112 + 4 * k, r[k])) return false;
+        float d2 = 0.0f;
+        for (int k = 0; k < 3; ++k) {
+            float a = 0.0f, b = 0.0f;
+            memcpy(&a, &p[k], 4); memcpy(&b, &r[k], 4);
+            d2 += (a - b) * (a - b);
+        }
+        return d2 < kRoadblockHitRadius * kRoadblockHitRadius;
+    }
+
+    static void* __fastcall RoadblockUpdateHook(void* self, void* /*edx*/, float dt) {
+        if (!IsActive() || !Features::On("roadblockhits")) return g_origRoadblockUpdate(self, dt);
+        uint32_t rb[kMaxRoadblocks];
+        bool before[kMaxRoadblocks] = {};
+        const int n = Roadblocks(rb);
+        const ULONGLONG now = GetTickCount64(), hit = Hooks::LastCollisionMs();
+        const bool contact = hit && now >= hit && now - hit <= kRoadblockHitMs;
+        for (int i = 0; i < n; ++i) {
+            if (!RoadblockPassed(rb[i], before[i]) || before[i] || !contact || !NearPlayer(rb[i])) continue;
+            __try { *reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(rb[i]) + 104) = 1; before[i] = true; }
+            __except (EXCEPTION_EXECUTE_HANDLER) {}
+            LOG("[cops] roadblock 0x%08X hit by the player -- not a dodge", rb[i]);
+        }
+        void* r = g_origRoadblockUpdate(self, dt);
+        uint32_t after[kMaxRoadblocks];
+        const int m = Roadblocks(after);
+        for (int i = 0; i < n; ++i) {
+            bool still = false, passed = false;
+            for (int j = 0; j < m && !still; ++j) still = after[j] == rb[i];
+            if (!still || before[i] || !RoadblockPassed(rb[i], passed) || !passed) continue;
+            const LONG c = InterlockedIncrement(&g_rbDodged);
+            LOG("[cops] roadblock 0x%08X dodged (%ld in this pursuit)", rb[i], c);
+            (void)c;
+        }
+        return r;
+    }
+
+    uint32_t RoadblocksDodged() { return static_cast<uint32_t>(g_rbDodged); }
+
     static bool IsRoadblockCop(uint32_t cop) {
         if (!cop || !Features::On("roadblockai")) return false;
         for (int i = 0; i < kMaxRoadblockCops; ++i) if (g_rbVehicle[i] == cop) return true;
@@ -420,6 +491,7 @@ namespace Mod::Pursuit {
         int32_t heat = carHeat < kMinHeat ? kMinHeat : carHeat > kMaxHeat ? kMaxHeat : static_cast<int32_t>(carHeat);
         LOG("[pursuit] ---- step 1: LaunchPursuit(heat %d, car heat %.2f) ----", heat, carHeat);
         g_goalCount = 0;
+        g_rbDodged = 0;
         g_statStartMs = now; g_statEndMs = 0; g_statMaxCops = 0; g_statBusted = false; g_statHeat = 0.0f;
         ::Mod::Stats::Reset();
         Results::PursuitStarted();
@@ -591,6 +663,7 @@ namespace Mod::Pursuit {
         ULONGLONG now = GetTickCount64();
         Music::Tick(now);
         Results::Tick(now);
+        Options::Tick(now);
 
         if (now >= g_nextWatchMs) {
             g_nextWatchMs = now + kWatchPeriodMs;
@@ -633,11 +706,14 @@ namespace Mod::Pursuit {
         Hooks::Attach(reinterpret_cast<void**>(&g_origModeGetter), reinterpret_cast<void*>(ModeGetterHook), "mode getter");
         g_origRoadblockAdd = reinterpret_cast<RoadblockAdd_t>(Addr(kRoadblockAddVehicle));
         Hooks::Attach(reinterpret_cast<void**>(&g_origRoadblockAdd), reinterpret_cast<void*>(RoadblockAddHook), "roadblock add vehicle");
+        g_origRoadblockUpdate = reinterpret_cast<RoadblockUpdate_t>(Addr(kRoadblockUpdate));
+        Hooks::Attach(reinterpret_cast<void**>(&g_origRoadblockUpdate), reinterpret_cast<void*>(RoadblockUpdateHook), "roadblock update (dodge)");
     }
 
     void Remove() {
         g_modeOverride.store(false);
         Hooks::Detach(reinterpret_cast<void**>(&g_origModeGetter), reinterpret_cast<void*>(ModeGetterHook));
         if (g_origRoadblockAdd) Hooks::Detach(reinterpret_cast<void**>(&g_origRoadblockAdd), reinterpret_cast<void*>(RoadblockAddHook));
+        if (g_origRoadblockUpdate) Hooks::Detach(reinterpret_cast<void**>(&g_origRoadblockUpdate), reinterpret_cast<void*>(RoadblockUpdateHook));
     }
 }
