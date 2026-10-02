@@ -1,12 +1,13 @@
-// Real freeroam pursuit without the scripted event:
-//   hit -> music mask pulse -> (650ms) event settings + mode 12 + music +
-//   GameCore.Cops.LaunchPursuit(heat 1) + cops attached/goal -> (750ms) FSM
-//   1->4 (pursuit HUD) -> AIPursuit gone -> "PostRace" results screen ->
-//   game calls EXIT when it is closed -> everything restored, FSM 4->1.
+// Pursuit lifecycle: LaunchPursuit, cops, HUD/settings, cooldown, end and results screen.
 #include "Pursuit.h"
 #include "Game.h"
 #include "Hooks.h"
 #include "Music.h"
+#include "Features.h"
+#include "Results.h"
+#include "Guard.h"
+#include "SpotFx.h"
+#include "Stats.h"
 #include "MapIcons.h"
 #include "MarkerFx.h"
 #include "Log.h"
@@ -16,14 +17,13 @@
 #include <string>
 
 namespace Mod::Pursuit {
-
-    constexpr int32_t   kLaunchHeat             = 1;
-    constexpr ULONGLONG kStep1DelayMs           = 650;   // music pulse (400ms) + 250ms, then LaunchPursuit
-    constexpr ULONGLONG kUiStepDelayMs          = 750;   // LaunchPursuit -> FSM flip
+    constexpr int32_t   kMinHeat = 1, kMaxHeat = 5;
+    constexpr ULONGLONG kStep1DelayMs           = 650;
+    constexpr ULONGLONG kUiStepDelayMs          = 750;
     constexpr ULONGLONG kGadgetReplayAgainMs    = 1500;
     constexpr ULONGLONG kEndAfterPursuitGoneMs  = 1000;
-    constexpr ULONGLONG kResultsTimeoutMs       = 60000; // no EXIT from the game -> force it
-    constexpr ULONGLONG kGoalFollowupMs         = 1500;  // respawned cops need StartPursuit twice
+    constexpr ULONGLONG kResultsTimeoutMs       = 60000;
+    constexpr ULONGLONG kGoalFollowupMs         = 1500;
     constexpr ULONGLONG kResultsWindowAfterExit = 30000;
     constexpr ULONGLONG kWatchPeriodMs          = 200;
     constexpr uint32_t  kFsmFreeroam = 1, kFsmPursuit = 4;
@@ -31,16 +31,10 @@ namespace Mod::Pursuit {
     constexpr uint32_t  kPowerupPageOffset = 168;
     constexpr int       kMaxCops = 64, kMaxTracked = 32, kMaxGadgets = 16;
 
-    // ICopMgr layout
     constexpr uint32_t kCopMgrPursuit = 0x1E0, kCandidates = 0x120, kCandidateCount = 0x128;
     constexpr uint32_t kManaged = 0x5C, kManagedCount = 0x64;
     constexpr int kAdoptVt = 28;
 
-    // ---------------------------------------------------------------- config
-    // Pursuit event settings (Attrib keys written into dword_D11948), powerup
-    // page and the HUD gadgets the real event shows. Values captured from a
-    // real pursuit event; NFSWorldPursuitProbe_recording.txt next to the .asi
-    // overrides them when present ("settings a b c d page p" / "gadget name show").
     static uint32_t g_cfgSlots[4] = { 0x306A1451, 0xF637CC39, 0x42ED6A19, 0x794FC606 };
     static uint32_t g_cfgPage = 3;
     static char g_cfgGadget[kMaxGadgets][48] = {};
@@ -83,31 +77,28 @@ namespace Mod::Pursuit {
             g_cfgSlots[2], g_cfgSlots[3], g_cfgPage, g_cfgGadgetCount);
     }
 
-    // ----------------------------------------------------------------- state
     static std::atomic<bool> g_hitRequested{ false };
-    static ULONGLONG g_step1DueMs = 0;       // game thread only from here on
+    static ULONGLONG g_step1DueMs = 0;
     static ULONGLONG g_uiStepDueMs = 0;
-    static bool g_active = false;            // our pursuit owns the game until exit
-    static bool g_uiEntered = false;         // FSM is at 4 because of us
+    static bool g_active = false;
+    static bool g_uiEntered = false;
     static bool g_sawAIPursuit = false;
     static bool g_cooldown = false;
     constexpr uint32_t kPursuitCooldown = 0x1A4;
     static ULONGLONG g_aiPursuitGoneMs = 0;
-    static bool g_resultsPhase = false;      // "PostRace" shown, waiting for the game's EXIT
+    static bool g_resultsPhase = false;
     static ULONGLONG g_resultsStartMs = 0;
     static uint32_t g_exitCallsAtResults = 0;
     static ULONGLONG g_gadgetReplayDueMs = 0;
     static ULONGLONG g_nextWatchMs = 0;
     static std::atomic<ULONGLONG> g_resultsWindowUntilMs{ 0 };
-    static std::atomic<bool> g_resultsWindowFlag{ false }; // mirrors g_active || g_resultsPhase
+    static std::atomic<bool> g_resultsWindowFlag{ false };
     static ULONGLONG g_statStartMs = 0, g_statEndMs = 0;
     static uint32_t g_statMaxCops = 0;
+    static bool g_statBusted = false;
+    static float g_statHeat = 0.0f;
     static uint8_t g_exitDummyThis[64] = {};
 
-    // --------------------------------------------------------- mode override
-    // The game-mode getter (sub_68ED10) mirrors GameCore's event type; HUD,
-    // radar, powerups and cop behaviour key off 12. While our pursuit runs the
-    // mode object at dword_CECC8C+0xF0 reads 12.
     using ModeGetter_t = int(__thiscall*)(void*);
     static ModeGetter_t g_origModeGetter = nullptr;
     static std::atomic<bool> g_modeOverride{ false };
@@ -119,7 +110,6 @@ namespace Mod::Pursuit {
         return g_origModeGetter(self);
     }
 
-    // ------------------------------------------------------------ primitives
     static bool CallSetFsm(uint32_t index) {
         __try {
             using SetState_t = uint32_t(__thiscall*)(void*, int, uint32_t);
@@ -137,16 +127,15 @@ namespace Mod::Pursuit {
     }
 
     static void ShowPursuitGadgets() {
+        bool all = Features::On("gadgets");
         for (int i = 0; i < g_cfgGadgetCount; ++i) {
+            if (!all && _strnicmp(g_cfgGadget[i], "PowerUp", 7) != 0) continue;
             char r = SetGadgetVisible(g_cfgGadget[i], g_cfgGadgetShow[i]);
             LOG("[gadgets] SetGadgetVisible(\"%s\", %d) -> %d", g_cfgGadget[i], g_cfgGadgetShow[i], (int)r);
             (void)r;
         }
     }
 
-    // GameCore.Cops.LaunchPursuit. Until a real pursuit binds the EASharp slot
-    // it still holds its stub; calling the stub (same cdecl signature) binds
-    // it and makes the call.
     static bool LaunchPursuit(int32_t heat) {
         uintptr_t gp = reinterpret_cast<uintptr_t>(GetModuleHandleA(GameplayNative::Module));
         if (!gp) return false;
@@ -160,7 +149,6 @@ namespace Mod::Pursuit {
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
-    // --------------------------------------------------------- event settings
     struct Settings { uint32_t obj = 0; uint32_t slots[4] = {}; uint32_t pm = 0; uint32_t page = 0xFFFFFFFF; bool ok = false; };
 
     static Settings g_saved;
@@ -185,8 +173,6 @@ namespace Mod::Pursuit {
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    // The PowerupManager pointer alternates between two instances: remember
-    // every one we write so all of them get their page back.
     static void SetPowerupMgrPage(uint32_t pm, uint32_t curPage, uint32_t page) {
         bool known = false;
         for (int i = 0; i < g_pmTouchedCount; ++i) if (g_pmTouched[i] == pm) known = true;
@@ -199,7 +185,6 @@ namespace Mod::Pursuit {
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    // Makes the powerup console gadget re-read the page (sub_48A3B0).
     static void RefreshPowerupGadget() {
         uint32_t screen = 0, hash = 0, gadget = 0;
         __try { screen = reinterpret_cast<uint32_t(__cdecl*)()>(Addr(Ida::CurrentScreen))(); }
@@ -213,15 +198,15 @@ namespace Mod::Pursuit {
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    // Before LaunchPursuit: cop spawn/AI read these settings live.
     static void ApplyEventSettings() {
         Settings cur = ReadSettings();
         if (!cur.ok) return;
         g_saved = cur;
         g_settingsApplied = true;
         g_pmTouchedCount = 0;
-        for (int i = 0; i < 4; ++i)
-            if (cur.slots[i] != g_cfgSlots[i]) WriteU32(cur.obj + i * 4, g_cfgSlots[i]);
+        if (Features::On("eventsettings"))
+            for (int i = 0; i < 4; ++i)
+                if (cur.slots[i] != g_cfgSlots[i]) WriteU32(cur.obj + i * 4, g_cfgSlots[i]);
         if (cur.pm && cur.page != g_cfgPage) SetPowerupMgrPage(cur.pm, cur.page, g_cfgPage);
         LOG("[settings] applied (freeroam was %08X %08X %08X %08X page %d)", cur.slots[0], cur.slots[1],
             cur.slots[2], cur.slots[3], static_cast<int32_t>(cur.page));
@@ -238,7 +223,6 @@ namespace Mod::Pursuit {
         g_settingsApplied = false;
         SetPowerupPageNative(g_freeroamPage);
         RefreshPowerupGadget();
-        // The freeroam screen is rebuilt ~150ms after FSM 4->1: refresh again at +0.5s and +1.5s.
         g_restoreRefreshStep = 0;
         g_restoreRefreshDueMs = GetTickCount64() + 500;
         LOG("[settings] restored, powerup page %u", g_freeroamPage);
@@ -261,7 +245,6 @@ namespace Mod::Pursuit {
         }
     }
 
-    // ------------------------------------------------------------------ cops
     struct CopMgr { uint32_t icop = 0, pursuit = 0, candidates = 0, managed = 0; bool ok = false; };
 
     static CopMgr ReadCopMgr() {
@@ -278,13 +261,11 @@ namespace Mod::Pursuit {
         return n;
     }
 
-    // What LaunchPursuit (sub_884D90) does only when its Attrib gate is open:
-    // adopt pending candidates (ICopMgr->vt[7](cop, id)) ...
     static void AdoptCandidates(const CopMgr& c) {
         uint32_t list = 0, vt = 0, adoptFn = 0, cops[kMaxCops] = {};
         if (!c.candidates || !ReadU32(c.icop + kCandidates, list) || !list) return;
         if (!ReadU32(c.icop, vt) || !ReadU32(vt + kAdoptVt, adoptFn) || !adoptFn) return;
-        uint32_t n = CopyList(list, c.candidates, cops); // copy first: Adopt edits the list
+        uint32_t n = CopyList(list, c.candidates, cops);
         for (uint32_t i = 0; i < n; ++i) {
             if (!cops[i]) continue;
             __try {
@@ -296,7 +277,6 @@ namespace Mod::Pursuit {
         }
     }
 
-    // ... and attach every managed cop to the new pursuit: (AIPursuit+36)->vt[2](cop).
     static void AttachManagedCops(const CopMgr& c) {
         uint32_t list = 0, iface = c.pursuit + 36, ifaceVt = 0, addFn = 0, cops[kMaxCops] = {};
         if (!c.managed || !ReadU32(c.icop + kManaged, list) || !list) return;
@@ -318,8 +298,36 @@ namespace Mod::Pursuit {
         __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     }
 
-    // IPursuitAI::StartPursuit(0, playerSimable) = target the player + AIGoalPursuit.
-    // The slot is located by scanning the interface vtable for sub_7FEC60.
+    static float PlayerHeat() {
+        if (!Features::On("heatread")) return -1.0f;
+        uint32_t simable = PlayerSimable(), table = 0, vt = 0, fn = 0;
+        if (!simable || !ReadU32(simable + 4, table) || !table) return -1.0f;
+        void* perp = nullptr;
+        __try {
+            perp = reinterpret_cast<void*(__thiscall*)(void*, void*)>(Addr(Ida::QueryInterface))(
+                reinterpret_cast<void*>(static_cast<uintptr_t>(table)), reinterpret_cast<void*>(Addr(Ida::KeyIPerpetrator)));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return -1.0f; }
+        if (!perp || !ReadU32(reinterpret_cast<uintptr_t>(perp), vt) || !ReadU32(vt + 4, fn) || !fn) return -1.0f;
+        __try { return reinterpret_cast<float(__thiscall*)(void*)>(fn)(perp); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return -1.0f; }
+    }
+
+    static bool PlayerSetHeat(float heat) {
+        uint32_t simable = PlayerSimable(), table = 0, vt = 0, fn = 0;
+        if (!simable || !ReadU32(simable + 4, table) || !table) return false;
+        void* perp = nullptr;
+        __try {
+            perp = reinterpret_cast<void*(__thiscall*)(void*, void*)>(Addr(Ida::QueryInterface))(
+                reinterpret_cast<void*>(static_cast<uintptr_t>(table)), reinterpret_cast<void*>(Addr(Ida::KeyIPerpetrator)));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        if (!perp || !ReadU32(reinterpret_cast<uintptr_t>(perp), vt) || !ReadU32(vt + 12, fn) || !fn) return false;
+        __try { reinterpret_cast<void(__thiscall*)(void*, float)>(fn)(perp, heat); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        return true;
+    }
+
     static void GiveCopGoal(uint32_t cop, uint32_t simable) {
         uint32_t table = 0, ai = 0, vt = 0;
         if (!ReadU32(cop + 4, table) || !table) return;
@@ -341,8 +349,26 @@ namespace Mod::Pursuit {
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
-    // Once per cop in the managed list (it churns every ~3s), plus one
-    // follow-up after 1.5s for cops whose spawn setup was not finished yet.
+    constexpr uint32_t kRoadblockAddVehicle = 0x7E6EB0;
+    constexpr int kMaxRoadblockCops = 64;
+    static uint32_t g_rbVehicle[kMaxRoadblockCops] = {};
+    static volatile LONG g_rbNext = 0;
+    using RoadblockAdd_t = char(__thiscall*)(void*, int);
+    static RoadblockAdd_t g_origRoadblockAdd = nullptr;
+
+    static char __fastcall RoadblockAddHook(void* roadblock, void* /*edx*/, int vehicle) {
+        const LONG i = (InterlockedIncrement(&g_rbNext) - 1) % kMaxRoadblockCops;
+        g_rbVehicle[i] = static_cast<uint32_t>(vehicle);
+        LOG("[cops] roadblock 0x%08X takes vehicle 0x%08X", static_cast<uint32_t>(reinterpret_cast<uintptr_t>(roadblock)), g_rbVehicle[i]);
+        return g_origRoadblockAdd(roadblock, vehicle);
+    }
+
+    static bool IsRoadblockCop(uint32_t cop) {
+        if (!cop || !Features::On("roadblockai")) return false;
+        for (int i = 0; i < kMaxRoadblockCops; ++i) if (g_rbVehicle[i] == cop) return true;
+        return false;
+    }
+
     static uint32_t g_goalCop[kMaxTracked] = {};
     static ULONGLONG g_goalAtMs[kMaxTracked] = {};
     static bool g_goalFollowup[kMaxTracked] = {};
@@ -366,14 +392,14 @@ namespace Mod::Pursuit {
         for (int j = 0; j < g_goalCount; ++j) {
             if (!g_goalFollowup[j] && now - g_goalAtMs[j] >= kGoalFollowupMs) {
                 g_goalFollowup[j] = true;
-                GiveCopGoal(g_goalCop[j], simable);
+                if (!IsRoadblockCop(g_goalCop[j])) GiveCopGoal(g_goalCop[j], simable);
             }
         }
         for (uint32_t i = 0; i < n; ++i) {
             bool known = !cops[i];
             for (int j = 0; j < g_goalCount && !known; ++j) known = g_goalCop[j] == cops[i];
             if (known) continue;
-            GiveCopGoal(cops[i], simable);
+            if (!IsRoadblockCop(cops[i])) GiveCopGoal(cops[i], simable);
             if (g_goalCount < kMaxTracked) {
                 g_goalCop[g_goalCount] = cops[i]; g_goalAtMs[g_goalCount] = now; g_goalFollowup[g_goalCount] = false;
                 ++g_goalCount;
@@ -381,23 +407,38 @@ namespace Mod::Pursuit {
         }
     }
 
-    // ------------------------------------------------------------- lifecycle
     static void SetActiveFlags() { g_resultsWindowFlag.store(g_active || g_resultsPhase, std::memory_order_release); }
 
-    // Step 1 (gameplay): everything GameCore would have set up for the event, then LaunchPursuit.
     static void StartGameplay(ULONGLONG now) {
-        LOG("[pursuit] ---- step 1: LaunchPursuit(heat %d) ----", kLaunchHeat);
+        CopMgr pre = ReadCopMgr();
+        if (pre.ok && pre.pursuit) {
+            LOG("[pursuit] a pursuit is already running (AIPursuit 0x%08X) -- ours not started", pre.pursuit);
+            Music::Restore();
+            return;
+        }
+        float carHeat = PlayerHeat();
+        int32_t heat = carHeat < kMinHeat ? kMinHeat : carHeat > kMaxHeat ? kMaxHeat : static_cast<int32_t>(carHeat);
+        LOG("[pursuit] ---- step 1: LaunchPursuit(heat %d, car heat %.2f) ----", heat, carHeat);
         g_goalCount = 0;
-        g_statStartMs = now; g_statEndMs = 0; g_statMaxCops = 0;
+        g_statStartMs = now; g_statEndMs = 0; g_statMaxCops = 0; g_statBusted = false; g_statHeat = 0.0f;
+        ::Mod::Stats::Reset();
+        Results::PursuitStarted();
+        SpotFx::PursuitStarted();
         ApplyEventSettings();
-        g_modeOverride.store(true);   // real order: mode 12 long before the AIPursuit exists
+        g_modeOverride.store(true);
         SetPowerupPageNative(g_cfgPage);
-        Music::ApplyPursuit(g_cfgSlots[0]);
-        MapIcons::EnterPursuit();      // event icons off, pursuit breakers on
-        MarkerFx::Hide();              // in-world event markers off, like a real event launch
-        bool ok = LaunchPursuit(kLaunchHeat);
+        if (Features::On("music")) Music::ApplyPursuit(g_cfgSlots[0]);
+        if (Features::On("mapicons")) MapIcons::EnterPursuit();
+        if (Features::On("markers")) MarkerFx::Hide();
+        Guard::NoteLaunch(GetTickCount64());
+        bool ok = LaunchPursuit(heat);
         LOG("[pursuit] LaunchPursuit %s", ok ? "called" : "FAILED");
-        (void)ok;
+        if (ok && carHeat > static_cast<float>(heat) && Features::On("heatread")) {
+            float h = carHeat > kMaxHeat ? static_cast<float>(kMaxHeat) : carHeat;
+            bool set = PlayerSetHeat(h);
+            LOG("[pursuit] car heat %.2f restored after LaunchPursuit (%s, now %.2f)", h, set ? "ok" : "FAILED", PlayerHeat());
+            (void)set;
+        }
         CopMgr c = ReadCopMgr();
         if (c.ok && c.pursuit) {
             AdoptCandidates(c);
@@ -414,11 +455,9 @@ namespace Mod::Pursuit {
         g_uiStepDueMs = now + kUiStepDelayMs;
     }
 
-    // Step 2 (UI): FSM 1->4 builds the pursuit screen; then show the event's gadgets.
     static void EnterPursuitScreen(ULONGLONG now) {
         uint32_t guard = ReadU32Or(Addr(Ida::Fsm) + 0x24, 0);
         uint32_t before = FsmIndex();
-        // Only from a clean freeroam state: flipping from anything else leaves the FSM inconsistent.
         if (!guard || before != kFsmFreeroam || !CallSetFsm(kFsmPursuit)) {
             LOG("[pursuit] FSM flip refused/failed (index %u) -- gameplay-only pursuit", before);
             return;
@@ -443,16 +482,18 @@ namespace Mod::Pursuit {
 
     static void EndPursuit(const char* why, bool callExit) {
         LOG("[pursuit] ---- end: %s ----", why);
+        if (g_resultsPhase) Results::Commit();
         (void)why;
         if (callExit) {
             __try { reinterpret_cast<int(__thiscall*)(void*)>(Addr(Ida::ExitPursuitMode))(g_exitDummyThis); }
             __except (EXCEPTION_EXECUTE_HANDLER) {}
         }
         Music::Restore();
+        SpotFx::Off();
         MapIcons::ExitPursuit();
         MarkerFx::Restore();
         g_resultsWindowUntilMs.store(GetTickCount64() + kResultsWindowAfterExit);
-        g_modeOverride.store(false);   // real order: EXIT, then mode 12->0 + FSM 4->1
+        g_modeOverride.store(false);
         if (FsmIndex() == kFsmPursuit) CallSetFsm(kFsmFreeroam);
         g_active = false;
         g_uiEntered = false;
@@ -467,18 +508,29 @@ namespace Mod::Pursuit {
     static void Watch(ULONGLONG now) {
         CopMgr c = ReadCopMgr();
         WatchEventSettings(now);
-        // A real event started after ours (FSM in the event screen without us): its results
-        // screen is the game's, so close the 30s "answer as ours" window right away.
-        // (not in the first 2s after our exit, while our own FSM 4 -> 1 settles)
         ULONGLONG until = g_resultsWindowUntilMs.load(std::memory_order_relaxed);
         if (!g_active && until && now + kResultsWindowAfterExit > until + 2000 && FsmIndex() == kFsmPursuit) {
             g_resultsWindowUntilMs.store(0);
             LOG("[results] real event started -- our results window closed");
         }
-        if (!g_active || !c.ok) return;
+        if (!g_active) return;
+        if (g_resultsPhase) {
+            if (::Mod::Log::Enabled()) {
+                static ULONGLONG s_beatMs = 0;
+                if (now - s_beatMs >= 5000) {
+                    s_beatMs = now;
+                    LOG("[results] waiting for the results screen to close: %llus, FSM=%u, exit calls %u, copmgr %s",
+                        (now - g_resultsStartMs) / 1000, FsmIndex(), Hooks::ExitPursuitModeCalls(), c.ok ? "ok" : "GONE");
+                }
+            }
+            if (Hooks::ExitPursuitModeCalls() != g_exitCallsAtResults) EndPursuit("results screen closed", false);
+            else if (now - g_resultsStartMs >= kResultsTimeoutMs) EndPursuit("results timeout", true);
+            return;
+        }
+        if (!c.ok) return;
 
         if (c.pursuit && c.managed > g_statMaxCops) g_statMaxCops = c.managed;
-        MarkerFx::Tick();
+        if (!g_resultsPhase && !g_aiPursuitGoneMs) MarkerFx::Tick();
         if (g_gadgetReplayDueMs && now >= g_gadgetReplayDueMs) {
             g_gadgetReplayDueMs = 0;
             ShowPursuitGadgets();
@@ -487,56 +539,70 @@ namespace Mod::Pursuit {
         if (c.pursuit) {
             g_sawAIPursuit = true;
             g_aiPursuitGoneMs = 0;
+            static ULONGLONG s_nextAdopt = 0;
+            if (!g_cooldown && now >= s_nextAdopt && Features::On("roadblocks")) {
+                s_nextAdopt = now + 1000;
+                if (c.candidates) {
+                    uint32_t before = c.managed, cand = c.candidates;
+                    AdoptCandidates(c);
+                    c = ReadCopMgr();
+                    if (c.ok && c.pursuit && c.managed != before) {
+                        LOG("[cops] %u new candidate(s) adopted (managed %u -> %u)", cand, before, c.managed);
+                        AttachManagedCops(c);
+                    }
+                }
+            }
+            if (!c.ok || !c.pursuit) return;
             GiveGoals(c, now);
-            // AIPursuit+0x1A4: 1 while in cooldown (+0x180 = eye contact, the opposite).
-            // Map icons follow it like the event script does: breakers <-> hiding spots.
             uint32_t cd = 0;
             if (!g_resultsPhase && ReadU32(c.pursuit + kPursuitCooldown, cd)) {
                 bool on = (cd & 0xFF) != 0;
-                if (on != g_cooldown) { g_cooldown = on; MapIcons::SetCooldown(on); }
+                if (on != g_cooldown) {
+                    g_cooldown = on;
+                    if (Features::On("mapicons")) MapIcons::SetCooldown(on);
+                    SpotFx::SetCooldown(on);
+                }
             }
         }
         else if (g_sawAIPursuit && !g_resultsPhase) {
-            if (!g_aiPursuitGoneMs) MapIcons::HidePursuitIcons();   // chase over: no breakers / hiding spots
-            // AIPursuit destroyed = evaded / busted.
+            if (!g_aiPursuitGoneMs) {
+                g_statBusted = !g_cooldown;
+                g_statHeat = PlayerHeat();
+                LOG("[pursuit] chase over: %s (heat %.2f)", g_statBusted ? "BUSTED" : "EVADED", g_statHeat);
+                Results::ChaseOver();
+                if (Features::On("mapicons")) MapIcons::HidePursuitIcons();
+                SpotFx::Off();
+            }
             if (!g_aiPursuitGoneMs) g_aiPursuitGoneMs = now;
             else if (now - g_aiPursuitGoneMs >= kEndAfterPursuitGoneMs) {
                 if (g_uiEntered) ShowResults(now);
                 else EndPursuit("AIPursuit gone (gameplay-only pursuit)", false);
             }
         }
-        if (g_resultsPhase) {
-            if (Hooks::ExitPursuitModeCalls() != g_exitCallsAtResults) EndPursuit("results screen closed", false);
-            else if (now - g_resultsStartMs >= kResultsTimeoutMs) EndPursuit("results timeout", true);
-        }
     }
 
-    // ------------------------------------------------------------------- API
     void PumpGameThread() {
         if (!OnGameThread()) return;
         ULONGLONG now = GetTickCount64();
         Music::Tick(now);
+        Results::Tick(now);
 
         if (now >= g_nextWatchMs) {
             g_nextWatchMs = now + kWatchPeriodMs;
             Watch(now);
-#ifdef _DEBUG
-            Log::PollMapLayers();
-#endif
         }
 
-        // Only from plain freeroam, never on top of a running pursuit / event.
         if (g_hitRequested.exchange(false, std::memory_order_acq_rel) && !g_active && !g_step1DueMs &&
             FsmIndex() == kFsmFreeroam) {
             LOG("[pursuit] ---- cop hit ----");
-            Music::BeginPulse(now);   // lets the music player drop the freeroam source
+            Music::BeginPulse(now);
             g_step1DueMs = now + kStep1DelayMs;
             return;
         }
         if (g_step1DueMs && now >= g_step1DueMs) {
             g_step1DueMs = 0;
             StartGameplay(now);
-            return;   // never step 1 and step 2 in the same frame
+            return;
         }
         if (g_uiStepDueMs && now >= g_uiStepDueMs) {
             g_uiStepDueMs = 0;
@@ -553,16 +619,20 @@ namespace Mod::Pursuit {
                GetTickCount64() < g_resultsWindowUntilMs.load(std::memory_order_relaxed);
     }
 
-    Stats GetStats() { return Stats{ g_statStartMs, g_statEndMs, g_statMaxCops }; }
+    Stats GetStats() { return Stats{ g_statStartMs, g_statEndMs, g_statMaxCops, g_statBusted, g_statHeat }; }
 
     void Install() {
+        Features::Load();
         LoadConfig();
         g_origModeGetter = reinterpret_cast<ModeGetter_t>(Addr(Ida::ModeGetter));
         Hooks::Attach(reinterpret_cast<void**>(&g_origModeGetter), reinterpret_cast<void*>(ModeGetterHook), "mode getter");
+        g_origRoadblockAdd = reinterpret_cast<RoadblockAdd_t>(Addr(kRoadblockAddVehicle));
+        Hooks::Attach(reinterpret_cast<void**>(&g_origRoadblockAdd), reinterpret_cast<void*>(RoadblockAddHook), "roadblock add vehicle");
     }
 
     void Remove() {
         g_modeOverride.store(false);
         Hooks::Detach(reinterpret_cast<void**>(&g_origModeGetter), reinterpret_cast<void*>(ModeGetterHook));
+        if (g_origRoadblockAdd) Hooks::Detach(reinterpret_cast<void**>(&g_origRoadblockAdd), reinterpret_cast<void*>(RoadblockAddHook));
     }
 }

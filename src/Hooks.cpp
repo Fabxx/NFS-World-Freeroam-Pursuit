@@ -1,3 +1,4 @@
+// Detours helpers and core hooks (game-thread pump, collisions, pursuit exit).
 #include "Hooks.h"
 #include "Game.h"
 #include "Pursuit.h"
@@ -6,7 +7,6 @@
 #include <atomic>
 
 namespace Mod::Hooks {
-
     bool Attach(void** original, void* detour, const char* name) {
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());

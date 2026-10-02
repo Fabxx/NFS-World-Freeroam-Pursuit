@@ -1,18 +1,18 @@
+// In-world event markers (activities): suspended during our pursuit, resumed afterwards.
 #include "MarkerFx.h"
 #include "Game.h"
 #include "Hooks.h"
 #include "Log.h"
 
 namespace Mod::MarkerFx {
-
     constexpr uint32_t kCtorSingle = 0x6882F0, kCtorDual = 0x688400;
     constexpr uint32_t kDtorSingle = 0x694F90, kDtorDual = 0x6950E0;
     constexpr uint32_t kVtSingle = 0xBB8D94, kVtDual = 0xBB8DC4;
-    constexpr uint32_t kSetSuspended = 0x774CA0;   // thiscall(activity, char)
+    constexpr uint32_t kSetSuspended = 0x774CA0;
     constexpr uint32_t kSuspendedByte = 37;
     constexpr int kMax = 4096;
 
-    struct Slot { uint32_t obj; bool ours; };
+    struct Slot { uint32_t obj; bool ours; bool spot; };
     static Slot g_slots[kMax];
     static int g_count = 0;
     static SRWLOCK g_lock = SRWLOCK_INIT;
@@ -28,18 +28,17 @@ namespace Mod::MarkerFx {
             if (!g_slots[i].obj && free < 0) free = i;
         }
         if (free < 0 && g_count < kMax) free = g_count++;
-        if (free >= 0) { g_slots[free].obj = obj; g_slots[free].ours = false; }
+        if (free >= 0) { g_slots[free].obj = obj; g_slots[free].ours = false; g_slots[free].spot = false; }
         ReleaseSRWLockExclusive(&g_lock);
     }
 
     static void __stdcall OnDestroy(uint32_t obj) {
         AcquireSRWLockExclusive(&g_lock);
         for (int i = 0; i < g_count; ++i)
-            if (g_slots[i].obj == obj) { g_slots[i].obj = 0; g_slots[i].ours = false; }
+            if (g_slots[i].obj == obj) { g_slots[i].obj = 0; g_slots[i].ours = false; g_slots[i].spot = false; }
         ReleaseSRWLockExclusive(&g_lock);
     }
 
-    // Register-transparent stubs: ecx = this for all four (thiscall).
 #define MARKER_STUB(Name, Fn, Orig) \
     static __declspec(naked) void Name() { \
         __asm pushfd \
@@ -73,8 +72,6 @@ namespace Mod::MarkerFx {
         return TryCallAny1(Addr32(kSetSuspended), obj, on ? 1u : 0u, r);
     }
 
-    // Candidates are copied under the lock and changed after releasing it: the game may
-    // destroy a marker inside sub_774CA0 and the destructor hook takes the same lock.
     static int Snapshot(uint32_t* out, bool wantOurs) {
         int n = 0;
         AcquireSRWLockExclusive(&g_lock);
@@ -90,15 +87,51 @@ namespace Mod::MarkerFx {
         ReleaseSRWLockExclusive(&g_lock);
     }
 
-    static uint32_t g_work[kMax];   // game thread only
+    static uint32_t g_work[kMax * 2];
 
-    // Suspend every live, active marker; returns how many.
+    static bool IsSpot(uint32_t obj) {
+        bool r = false;
+        AcquireSRWLockExclusive(&g_lock);
+        for (int i = 0; i < g_count; ++i) if (g_slots[i].obj == obj) { r = g_slots[i].spot; break; }
+        ReleaseSRWLockExclusive(&g_lock);
+        return r;
+    }
+
+    static void MarkSpot(uint32_t obj, bool spot) {
+        AcquireSRWLockExclusive(&g_lock);
+        for (int i = 0; i < g_count; ++i) if (g_slots[i].obj == obj) g_slots[i].spot = spot;
+        ReleaseSRWLockExclusive(&g_lock);
+    }
+
+    static int SnapshotAll(uint32_t* out) {
+        int m = Snapshot(out, false);
+        return m + Snapshot(out + m, true);
+    }
+
     static int SuspendActive() {
-        int n = 0, m = Snapshot(g_work, false);
+        int n = 0, m = SnapshotAll(g_work);
         for (int i = 0; i < m; ++i) {
             bool susp = true;
-            if (!IsMarker(g_work[i]) || !ReadSuspended(g_work[i], susp) || susp) continue;
-            if (SetSuspended(g_work[i], true)) { MarkOurs(g_work[i], true); ++n; }
+            uint32_t o = g_work[i];
+            if (!IsMarker(o) || !ReadSuspended(o, susp) || susp || IsSpot(o)) continue;
+            if (SetSuspended(o, true)) { MarkOurs(o, true); ++n; }
+        }
+        return n;
+    }
+
+    int FlagSpotsTurnedOnBy(void (*fn)(void*), void* ctx) {
+        static uint32_t before[kMax * 2];
+        static uint8_t wasSusp[kMax * 2];
+        int m = SnapshotAll(before);
+        for (int i = 0; i < m; ++i) { bool su = true; wasSusp[i] = (IsMarker(before[i]) && ReadSuspended(before[i], su) && su) ? 1 : 0; }
+        fn(ctx);
+        int n = 0;
+        for (int i = 0; i < m; ++i) {
+            bool su = true;
+            if (!wasSusp[i] || !IsMarker(before[i]) || !ReadSuspended(before[i], su) || su) continue;
+            MarkSpot(before[i], true);
+            MarkOurs(before[i], false);
+            ++n;
         }
         return n;
     }
@@ -114,20 +147,26 @@ namespace Mod::MarkerFx {
         if (!g_hidden) return;
         int n = SuspendActive();
         if (n) LOG("[markers] %d more marker(s) suspended", n);
+        (void)n;
     }
 
     void Restore() {
         if (!g_hidden) return;
         g_hidden = false;
-        int n = 0, m = Snapshot(g_work, true);
+        int n = 0, hidden = 0, m = SnapshotAll(g_work);
         for (int i = 0; i < m; ++i) {
-            MarkOurs(g_work[i], false);
+            uint32_t o = g_work[i];
+            bool ours = false, spot = false;
+            AcquireSRWLockExclusive(&g_lock);
+            for (int k = 0; k < g_count; ++k) if (g_slots[k].obj == o) { ours = g_slots[k].ours; spot = g_slots[k].spot; g_slots[k].ours = g_slots[k].spot = false; break; }
+            ReleaseSRWLockExclusive(&g_lock);
             bool susp = false;
-            // undo only if it is still a marker and still suspended
-            if (IsMarker(g_work[i]) && ReadSuspended(g_work[i], susp) && susp && SetSuspended(g_work[i], false)) ++n;
+            if (!IsMarker(o) || !ReadSuspended(o, susp)) continue;
+            if (spot) { if (!susp && SetSuspended(o, true)) ++hidden; }
+            else if (ours && susp && SetSuspended(o, false)) ++n;
         }
-        LOG("[markers] %d in-world event marker(s) resumed", n);
-        (void)n;
+        LOG("[markers] %d in-world event marker(s) resumed, %d hiding spot marker(s) removed", n, hidden);
+        (void)n; (void)hidden;
     }
 
     void Install() {

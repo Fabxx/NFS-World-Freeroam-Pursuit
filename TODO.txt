@@ -1,0 +1,5 @@
+- Enable/Disable Pursuit from Options.gfx
+
+  - see how to read/write UserSettings.xml or Settings.xml
+
+- Reset heat level to 1 if getting busted

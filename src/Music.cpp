@@ -1,21 +1,19 @@
+// Pursuit music: event Attrib collection, forced song and music source.
 #include "Music.h"
 #include "Game.h"
 #include "Hooks.h"
 #include "Log.h"
+#include "Features.h"
 #include <cstring>
 
 namespace Mod::Music {
-
     constexpr char kMaskBit = 20;
     constexpr ULONGLONG kPulseMs = 400;
     constexpr uint32_t kEventSettingsClass = 40595996;
-    constexpr int32_t kPursuitSong = 1;
     constexpr int kSndWords = 8;
 
-    static ULONGLONG g_pulseOffDueMs = 0;   // game thread only
+    static ULONGLONG g_pulseOffDueMs = 0;
 
-    // Music player = ECX of its update method; captured by a register-only
-    // stub (no assumption about the method's signature).
     static uint32_t g_origPlayerUpdate = 0;
     static volatile uint32_t g_player = 0;
 
@@ -26,11 +24,12 @@ namespace Mod::Music {
         }
     }
 
-    static uint32_t g_sndApplied = 0;       // snd instance we wrote, 0 = none
+    static uint32_t g_sndApplied = 0;
     static uint32_t g_sndSaved[kSndWords] = {};
     static bool g_songApplied = false;
     static uint32_t g_songSaved = 0;
-    static uint32_t g_srcApplied = 0;       // music source we wrote, 0 = none
+    static int32_t g_nextSong = -1;
+    static uint32_t g_srcApplied = 0;
     static uint8_t g_srcSaved64 = 0;
 
     static void CallMask(bool on) {
@@ -63,14 +62,16 @@ namespace Mod::Music {
             LOG("[music] event Attrib collection for key %08X not found -- pursuit music stays freeroam", eventKey);
             return;
         }
-        // Only overwrite a real Attrib instance: word 0 = collection, word 1 = its layout (*(coll+28)).
-        // Sometimes mgr+200 holds another object (word 0 = vtable): writing it crashed 3 ms later
-        // in the tick list sub_654AC0 (call into coll+0x570).
         const uint32_t mb = static_cast<uint32_t>(ExeBase());
-        uint32_t curLayout = 0;
-        bool isImage = cur[0] >= mb && cur[0] < mb + 0x1000000;
-        if (isImage || !cur[0] || !ReadU32(cur[0] + 28, curLayout) || curLayout != cur[1]) {
-            LOG("[music] snd 0x%08X is not an Attrib instance now (%08X %08X) -- pursuit music not applied", snd, cur[0], cur[1]);
+        auto inImage = [mb](uint32_t v) { return v >= mb && v < mb + 0x1000000; };
+        uint32_t curLayout = 0, curW0 = 0, newW0 = 0;
+        bool ok = cur[0] && !inImage(cur[0]) && ReadU32(cur[0] + 28, curLayout) && curLayout == cur[1] &&
+                  ReadU32(cur[0], curW0) && !inImage(curW0) && ReadU32(coll, newW0) && !inImage(newW0) &&
+                  !inImage(cur[1]) && cur[0] != snd;
+        const bool pair67 = !inImage(cur[6]) && !inImage(cur[7]);
+        if (!ok || !pair67) {
+            LOG("[music] snd 0x%08X is not an Attrib instance now (%08X %08X .. %08X %08X, *w0 %08X) -- pursuit music not applied",
+                snd, cur[0], cur[1], cur[6], cur[7], curW0);
             return;
         }
         uint32_t want[kSndWords];
@@ -82,14 +83,20 @@ namespace Mod::Music {
             g_sndApplied = snd;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {}
-        LOG("[music] snd 0x%08X -> event collection 0x%08X (layout 0x%08X)", snd, coll, layout);
+        LOG("[music] snd 0x%08X -> event collection 0x%08X (layout 0x%08X) | was %08X %08X .. %08X %08X *w0 %08X, new *w0 %08X",
+            snd, coll, layout, g_sndSaved[0], g_sndSaved[1], g_sndSaved[6], g_sndSaved[7], curW0, newW0);
     }
 
     static void ApplySong() {
         uint32_t cur = 0;
+        if (!Features::On("song")) return;
         if (g_songApplied || !ReadU32(Addr(Ida::ForcedSong), cur)) return;
-        __try { *reinterpret_cast<volatile int32_t*>(Addr(Ida::ForcedSong)) = kPursuitSong; }
+        if (g_nextSong < 0) g_nextSong = static_cast<int32_t>(GetTickCount64() & 1);
+        int32_t song = g_nextSong;
+        g_nextSong ^= 1;
+        __try { *reinterpret_cast<volatile int32_t*>(Addr(Ida::ForcedSong)) = song; }
         __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+        LOG("[music] pursuit song %d", song);
         g_songSaved = cur;
         g_songApplied = true;
     }

@@ -1,4 +1,4 @@
-#ifdef _DEBUG
+// Log file and crash logger: always on in Debug, in Release only when NFSWorldPursuitProbe_debug.txt exists.
 #include "Log.h"
 #include "Game.h"
 #include "Pursuit.h"
@@ -10,19 +10,26 @@
 #include <string>
 
 namespace Mod::Log {
-
     static FILE* g_file = nullptr;
     static std::mutex g_mutex;
+    static volatile bool g_enabled = false;
+
+    bool Enabled() { return g_enabled; }
 
     void Open() {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_file) return;
+#ifndef _DEBUG
+        if (GetFileAttributesA((ModuleDir() + "NFSWorldPursuitProbe_debug.txt").c_str()) == INVALID_FILE_ATTRIBUTES) return;
+#endif
         std::string path = ModuleDir() + "NFSWorldPursuitProbe.log";
         if (fopen_s(&g_file, path.c_str(), "w") != 0) g_file = nullptr;
+        g_enabled = g_file != nullptr;
     }
 
     void Close() {
         std::lock_guard<std::mutex> lock(g_mutex);
+        g_enabled = false;
         if (g_file) { fclose(g_file); g_file = nullptr; }
     }
 
@@ -40,17 +47,14 @@ namespace Mod::Log {
         fflush(g_file);
     }
 
-    // ---------------------------------------------------------- crash logger
     static PVOID g_veh = nullptr;
     static volatile LONG g_crashLines = 0;
 
     static LONG CALLBACK CrashHandler(PEXCEPTION_POINTERS ep) {
         DWORD code = ep->ExceptionRecord->ExceptionCode;
-        if (code != EXCEPTION_ACCESS_VIOLATION && code != 0x80000003 /* int3: EASharp unhandled managed exception */ &&
-            code != EXCEPTION_STACK_OVERFLOW && code != 0xC0000374 /* heap corruption */)
+        if (code < 0xC0000000 && code != 0x80000003 && code != 0xE06D7363 && code != 0xE0434352)
             return EXCEPTION_CONTINUE_SEARCH;
-        if (!Pursuit::InResultsWindow() || InterlockedIncrement(&g_crashLines) > 8) return EXCEPTION_CONTINUE_SEARCH;
-        // our own guarded reads fault on purpose
+        if (!Pursuit::InResultsWindow() || InterlockedIncrement(&g_crashLines) > 30) return EXCEPTION_CONTINUE_SEARCH;
         HMODULE self = nullptr, at = nullptr;
         GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             reinterpret_cast<LPCSTR>(&CrashHandler), &self);
@@ -75,7 +79,6 @@ namespace Mod::Log {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    void InstallCrashLogger() { if (!g_veh) g_veh = AddVectoredExceptionHandler(1, CrashHandler); }
+    void InstallCrashLogger() { if (!g_veh && g_enabled) g_veh = AddVectoredExceptionHandler(1, CrashHandler); }
     void RemoveCrashLogger() { if (g_veh) { RemoveVectoredExceptionHandler(g_veh); g_veh = nullptr; } }
 }
-#endif

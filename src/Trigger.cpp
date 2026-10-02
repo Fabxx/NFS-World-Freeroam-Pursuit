@@ -1,3 +1,4 @@
+// Worker thread: F9 toggle and cop-hit detection.
 #include "Trigger.h"
 #include "Game.h"
 #include "Hooks.h"
@@ -7,17 +8,16 @@
 #include <cmath>
 
 namespace Mod::Trigger {
-
     constexpr DWORD     kPollMs            = 50;
-    constexpr float     kHitRadius         = 5.0f;   // center-to-center: real contact reads ~4.6
+    constexpr float     kHitRadius         = 5.0f;
     constexpr float     kReleaseRadius     = kHitRadius * 1.5f;
-    constexpr float     kMinSpeedDrop      = 4.0f;   // units/s in one tick (no-contact max seen 0.8)
+    constexpr float     kMinSpeedDrop      = 4.0f;
     constexpr float     kMinAngleChangeDeg = 30.0f;
     constexpr float     kMinSpeedForAngle  = 3.0f;
-    constexpr ULONGLONG kCollisionWindowMs = 200;    // low-speed contacts only show up here
+    constexpr ULONGLONG kCollisionWindowMs = 200;
     constexpr ULONGLONG kCooldownMs        = 3000;
-    constexpr int       kNearestCopVt      = 44;     // ICopMgr: thiscall(this, &angleRad, &dist)
-    constexpr int       kVelocityVt        = 8;      // ICollisionBody: -> float[3]
+    constexpr int       kNearestCopVt      = 44;
+    constexpr int       kVelocityVt        = 8;
 
     static HANDLE g_thread = nullptr;
     static std::atomic<bool> g_stop{ false };
@@ -35,7 +35,6 @@ namespace Mod::Trigger {
         return true;
     }
 
-    // local player (array entry 0) -> QI(ICollisionBody) -> vt[2] velocity
     static bool PlayerVelocity(float v[3]) {
         uint32_t count = 0, base = 0, player = 0, table = 0, body = 0, vt = 0, fn = 0, vec = 0;
         if (!ReadU32(Addr(Ida::LocalPlayerCount), count) || !count || !ReadU32(Addr(Ida::LocalPlayerBase), base) || !base ||
@@ -55,7 +54,7 @@ namespace Mod::Trigger {
     }
 
     static DWORD WINAPI ThreadProc(LPVOID) {
-        bool armed = true, wasF9 = true, latched = false, haveLast = false;
+        bool armed = false, wasF9 = false, latched = false, haveLast = false;
 #ifdef _DEBUG
         bool wasF7 = false;
 #endif
@@ -83,9 +82,8 @@ namespace Mod::Trigger {
             ULONGLONG now = GetTickCount64();
             float dist = 0.0f;
             if (!NearestCopDistance(dist)) continue;
-            if (dist <= 0.0f) { latched = false; continue; }   // no cop tracked
+            if (dist <= 0.0f) { latched = false; continue; }
 
-            // Player jolt: sampled every tick so the "before" sample is fresh.
             float v[3];
             bool jolt = false;
             if (PlayerVelocity(v)) {

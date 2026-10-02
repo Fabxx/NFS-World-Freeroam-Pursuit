@@ -1,8 +1,8 @@
+// Game base address, guarded memory reads and generic calls.
 #include "Game.h"
 #include <atomic>
 
 namespace Mod {
-
     static uintptr_t g_exeBase = 0;
     static std::atomic<DWORD> g_gameThreadId{ 0 };
 
