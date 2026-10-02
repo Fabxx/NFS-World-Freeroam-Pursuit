@@ -94,9 +94,12 @@
     <ClInclude Include="src\MapIcons.h" />
     <ClInclude Include="src\MarkerFx.h" />
     <ClInclude Include="src\Music.h" />
+    <ClInclude Include="src\Stats.h" />
+    <ClInclude Include="src\Guard.h" />
+    <ClInclude Include="src\SpotFx.h" />
+    <ClInclude Include="src\Features.h" />
     <ClInclude Include="src\Pursuit.h" />
     <ClInclude Include="src\Results.h" />
-    <None Include="src\ScriptBindings.inc" />
     <ClInclude Include="src\Trigger.h" />
     <ClInclude Include="third_party\detours\detours.h" />
   </ItemGroup>
@@ -108,9 +111,11 @@
     <ClCompile Include="src\Log.cpp" />
     <ClCompile Include="src\MapIcons.cpp" />
     <ClCompile Include="src\MarkerFx.cpp" />
-    <ClCompile Include="src\MapProbe.cpp" />
-    <ClCompile Include="src\ScriptProbe.cpp" />
     <ClCompile Include="src\Music.cpp" />
+    <ClCompile Include="src\Stats.cpp" />
+    <ClCompile Include="src\Guard.cpp" />
+    <ClCompile Include="src\SpotFx.cpp" />
+    <ClCompile Include="src\Features.cpp" />
     <ClCompile Include="src\Pursuit.cpp" />
     <ClCompile Include="src\Results.cpp" />
     <ClCompile Include="src\Trigger.cpp" />

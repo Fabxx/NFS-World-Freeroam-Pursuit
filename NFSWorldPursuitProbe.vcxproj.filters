@@ -30,6 +30,18 @@
     <ClInclude Include="src\Music.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\Stats.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Guard.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\SpotFx.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Features.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="src\Pursuit.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -65,13 +77,19 @@
     <ClCompile Include="src\MarkerFx.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\MapProbe.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\ScriptProbe.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="src\Music.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Stats.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Guard.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\SpotFx.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Features.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\Pursuit.cpp">

@@ -569,6 +569,11 @@ namespace Mod::Pursuit {
                 g_statBusted = !g_cooldown;
                 g_statHeat = PlayerHeat();
                 LOG("[pursuit] chase over: %s (heat %.2f)", g_statBusted ? "BUSTED" : "EVADED", g_statHeat);
+                
+                if (g_statBusted) {
+                     PlayerSetHeat(kMinHeat);
+                }
+                
                 Results::ChaseOver();
                 if (Features::On("mapicons")) MapIcons::HidePursuitIcons();
                 SpotFx::Off();
