@@ -8,6 +8,7 @@
 #include "Guard.h"
 #include "SpotFx.h"
 #include "MarkerFx.h"
+#include "HeatTimer.h"
 #include "Trigger.h"
 #include "Options.h"
 #include "Log.h"
@@ -30,6 +31,7 @@ static DWORD WINAPI InitThread(LPVOID) {
     Mod::Guard::Install();
     Mod::SpotFx::Install();
     Mod::MarkerFx::Install();
+    Mod::HeatTimer::Install();
     Mod::Options::Install();
     Mod::Trigger::Start();
     return 0;
@@ -54,6 +56,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         if (reserved == nullptr) {
             Mod::Trigger::Stop(true);
             Mod::Options::Remove();
+            Mod::HeatTimer::Remove();
             Mod::MarkerFx::Remove();
             Mod::SpotFx::Remove();
             Mod::Guard::Remove();

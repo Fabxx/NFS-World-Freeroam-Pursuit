@@ -11,6 +11,7 @@
 #include "Stats.h"
 #include "MapIcons.h"
 #include "MarkerFx.h"
+#include "HeatTimer.h"
 #include "Log.h"
 #include <atomic>
 #include <cstdio>
@@ -585,8 +586,9 @@ namespace Mod::Pursuit {
             g_resultsWindowUntilMs.store(0);
             LOG("[results] real event started -- our results window closed");
         }
-        if (!g_active) return;
+        if (!g_active) { HeatTimer::Tick(now, false, -1.0f); return; }
         if (g_resultsPhase) {
+            HeatTimer::Tick(now, false, -1.0f);
             if (::Mod::Log::Enabled()) {
                 static ULONGLONG s_beatMs = 0;
                 if (now - s_beatMs >= 5000) {
@@ -601,6 +603,10 @@ namespace Mod::Pursuit {
         }
         if (!c.ok) return;
 
+        {
+            float force = HeatTimer::Tick(now, c.pursuit != 0 && !g_aiPursuitGoneMs, c.pursuit ? PlayerHeat() : -1.0f, g_cooldown);
+            if (force >= 0.0f) PlayerSetHeat(force);   // ritmo del calore della beta
+        }
         if (c.pursuit && c.managed > g_statMaxCops) g_statMaxCops = c.managed;
         if (!g_resultsPhase && !g_aiPursuitGoneMs) MarkerFx::Tick();
         if (g_gadgetReplayDueMs && now >= g_gadgetReplayDueMs) {
