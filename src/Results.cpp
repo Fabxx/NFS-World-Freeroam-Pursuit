@@ -412,6 +412,15 @@ namespace Mod::Results {
         return r;
     }
 
+    int PursuitRepSoFar() {
+        const Pursuit::Stats st = Pursuit::GetStats();
+        const Rewards r = ComputeRewards(st, st.maxCops ? st.maxCops : 1, 0.0f);
+        int rep = 0;
+        for (int i = 0; i < r.nParts; ++i)
+            if (strcmp(r.parts[i].cat, "Pursuit") == 0) rep += r.parts[i].rep;
+        return rep;
+    }
+
     struct Lucky { const char* icon; const char* title; int hash; const char* tag; };
     static const Lucky kLucky[] = {
         { "product_run_flats_x1_no_bg", "RUN FLATS", -537557654, "runflattires" },

@@ -3,6 +3,7 @@
 #include "Game.h"
 #include "Hooks.h"
 #include "Pursuit.h"
+#include "RepFlash.h"
 #include "Log.h"
 #include <cstring>
 
@@ -32,6 +33,7 @@ namespace Mod::Stats {
             }
         }
         g_valid = 1;
+        RepFlash::Poll();
     }
 
     static __declspec(naked) void HudStub() {

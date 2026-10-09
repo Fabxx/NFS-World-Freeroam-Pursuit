@@ -11,6 +11,7 @@
 #include "HeatTimer.h"
 #include "Trigger.h"
 #include "Options.h"
+#include "RepFlash.h"
 #include "Log.h"
 
 static bool g_running = false;
@@ -33,6 +34,7 @@ static DWORD WINAPI InitThread(LPVOID) {
     Mod::MarkerFx::Install();
     Mod::HeatTimer::Install();
     Mod::Options::Install();
+    Mod::RepFlash::Install();
     Mod::Trigger::Start();
     return 0;
 }
@@ -55,6 +57,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         if (!g_running) return TRUE;
         if (reserved == nullptr) {
             Mod::Trigger::Stop(true);
+            Mod::RepFlash::Remove();
             Mod::Options::Remove();
             Mod::HeatTimer::Remove();
             Mod::MarkerFx::Remove();

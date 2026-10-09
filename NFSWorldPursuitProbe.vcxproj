@@ -103,6 +103,7 @@
     <ClInclude Include="src\Pursuit.h" />
     <ClInclude Include="src\Results.h" />
     <ClInclude Include="src\Trigger.h" />
+    <ClInclude Include="src\RepFlash.h" />
     <ClInclude Include="third_party\detours\detours.h" />
   </ItemGroup>
   <ItemGroup>
@@ -123,6 +124,7 @@
     <ClCompile Include="src\Pursuit.cpp" />
     <ClCompile Include="src\Results.cpp" />
     <ClCompile Include="src\Trigger.cpp" />
+    <ClCompile Include="src\RepFlash.cpp" />
     <!-- Vendored Detours (MIT license, see third_party\detours\LICENSE),
          compiled straight into this DLL instead of a separate .lib. -->
     <ClCompile Include="third_party\detours\detours.cpp">

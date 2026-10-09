@@ -57,6 +57,9 @@
     <ClInclude Include="src\Trigger.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="src\RepFlash.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="third_party\detours\detours.h">
       <Filter>Detours</Filter>
     </ClInclude>
@@ -111,6 +114,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\Trigger.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\RepFlash.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="third_party\detours\detours.cpp">
