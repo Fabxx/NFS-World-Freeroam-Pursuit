@@ -10,6 +10,9 @@
 // (es. arresto) si riparte da li'. I tempi si cambiano con righe "level <n> <secondi>" in
 // NFSWorldPursuitProbe_heattimer.txt; "maxlevel <n>" limita il livello massimo (default 10).
 //
+// L'indicatore del calore si riempie in base al tempo trascorso nel livello (calore = livello + frazione),
+// feature "heatfill" (attiva di default; disattivandola il calore resta fermo sull'intero come prima).
+//
 // Con "heatpacing" disattivato (NFSWorldPursuitProbe_disable.txt) il calore resta al gioco e il timer viene solo
 // stimato: crescita continua -> (prossimo intero - calore) / velocita'; a scatti -> intervallo misurato tra due
 // scatti (prima del primo: "interval <secondi>", default 180).
@@ -42,6 +45,24 @@ namespace Mod::HeatTimer {
     static int g_maxLevel = 10;   // livello massimo raggiungibile ("maxlevel <n>")
     static int g_paceLevel = 0;
     static ULONGLONG g_paceStepMs = 0;
+    // ultimo calore raggiunto (livello + frazione): il prossimo inseguimento riparte da qui.
+    // Salvato anche su file (NFSWorldPursuitProbe_heat.txt) per ritrovarlo dopo un riavvio del gioco.
+    static float g_savedHeat = 0.0f;
+    static ULONGLONG g_nextSaveMs = 0;
+    static std::string SavePath() { return ModuleDir() + "NFSWorldPursuitProbe_heat.txt"; }
+    static void WriteSaved() {
+        FILE* f = nullptr;
+        if (fopen_s(&f, SavePath().c_str(), "w") != 0 || !f) return;
+        fprintf(f, "%.4f\n", g_savedHeat);
+        fclose(f);
+    }
+    static void ReadSaved() {
+        FILE* f = nullptr;
+        if (fopen_s(&f, SavePath().c_str(), "r") != 0 || !f) return;
+        float v = 0.0f;
+        if (fscanf_s(f, "%f", &v) == 1 && v >= 1.0f && v <= static_cast<float>(kMaxLevel)) g_savedHeat = v;
+        fclose(f);
+    }
 
     // stato del calcolo
     static bool g_wasActive = false;
@@ -101,6 +122,8 @@ namespace Mod::HeatTimer {
         if (!Features::On("heattimer")) { LOG("[heattimer] disattivato"); return; }
         g_pacing = Features::On("heatpacing");
         LoadConfig();
+        ReadSaved();
+        LOG("[heattimer] calore salvato all'avvio: %.3f", g_savedHeat);
         LOG("[heattimer] ritmo del calore della beta: %s", g_pacing ? "ON" : "OFF");
         uint8_t* p = reinterpret_cast<uint8_t*>(Addr(kPatchVa));
         if (memcmp(p, kOriginal, sizeof(kOriginal)) != 0) {
@@ -116,6 +139,12 @@ namespace Mod::HeatTimer {
         FlushInstructionCache(GetCurrentProcess(), p, 5);
         g_patched = true;
         LOG("[heattimer] patch HUD installata (0x%08X)", kPatchVa);
+    }
+
+    void ResetSaved(float heat) {
+        g_savedHeat = heat;
+        WriteSaved();
+        LOG("[heattimer] calore salvato azzerato a %.2f", heat);
     }
 
     void Remove() {
@@ -147,9 +176,19 @@ namespace Mod::HeatTimer {
         int gameLevel = static_cast<int>(std::floor(heat + 0.0001f));
         if (gameLevel < 1) gameLevel = 1;
         if (g_paceLevel == 0) {
-            g_paceLevel = gameLevel > g_maxLevel ? g_maxLevel : gameLevel;
-            g_paceStepMs = now;
-            LOG("[heattimer] inizio: calore %.3f, livello %d per %.0f s", heat, g_paceLevel, g_levelSecs[g_paceLevel]);
+            // riparte dal calore salvato alla fine dell'inseguimento precedente (se il gioco non e' gia' piu' in alto)
+            float start = heat;
+            if (Features::On("heatkeep") && g_savedHeat > start) start = g_savedHeat;
+            int lv = static_cast<int>(std::floor(start + 0.0001f));
+            if (lv < 1) lv = 1;
+            if (lv > g_maxLevel) lv = g_maxLevel;
+            float frac = start - static_cast<float>(lv);
+            if (frac < 0.0f || lv >= g_maxLevel) frac = 0.0f;
+            if (frac > 0.995f) frac = 0.995f;
+            g_paceLevel = lv;
+            g_paceStepMs = now - static_cast<ULONGLONG>(frac * g_levelSecs[lv] * 1000.0f);
+            LOG("[heattimer] inizio: calore del gioco %.3f, salvato %.3f -> livello %d al %.0f%% (%.0f s per livello)",
+                heat, g_savedHeat, g_paceLevel, frac * 100.0f, g_levelSecs[g_paceLevel]);
         }
         else if (gameLevel < g_paceLevel) {        // il gioco ha abbassato il calore (es. arresto): si riparte da li'
             LOG("[heattimer] calore sceso dal gioco: livello %d -> %d", g_paceLevel, gameLevel);
@@ -174,15 +213,24 @@ namespace Mod::HeatTimer {
             g_nextLogMs = now + 5000;
             LOG("[heattimer] calore del gioco %.3f, livello %d, mancano %.1f s", heat, g_paceLevel, remaining);
         }
-        // il gioco non deve salire da solo: calore fissato al livello in corso
+        // il gioco non deve salire da solo: il calore segue il timer del livello in corso, cosi' l'indicatore
+        // si riempie gradualmente (livello + frazione di tempo trascorsa) e scatta al livello successivo a zero
         float target = static_cast<float>(g_paceLevel);
+        if (g_paceLevel < g_maxLevel && dur > 0.0f && Features::On("heatfill")) {
+            float frac = elapsed / dur;
+            if (frac < 0.0f) frac = 0.0f;
+            if (frac > 0.995f) frac = 0.995f;
+            target += frac;
+        }
+        g_savedHeat = target;
+        if (now >= g_nextSaveMs) { g_nextSaveMs = now + 2000; WriteSaved(); }
         return std::fabs(heat - target) > 0.001f ? target : -1.0f;
     }
 
     float Tick(ULONGLONG now, bool active, float heat, bool paused) {
         if (!g_patched) return -1.0f;
         if (!active || heat < 0.0f) {
-            if (g_wasActive) LOG("[heattimer] fine inseguimento");
+            if (g_wasActive) { LOG("[heattimer] fine inseguimento, calore salvato %.3f", g_savedHeat); WriteSaved(); }
             g_wasActive = false;
             g_paceLevel = 0;
             g_lastTickMs = 0;

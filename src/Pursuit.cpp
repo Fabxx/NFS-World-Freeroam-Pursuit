@@ -24,7 +24,9 @@ namespace Mod::Pursuit {
     constexpr ULONGLONG kUiStepDelayMs          = 750;
     constexpr ULONGLONG kGadgetReplayAgainMs    = 1500;
     constexpr ULONGLONG kEndAfterPursuitGoneMs  = 1000;
-    constexpr ULONGLONG kResultsTimeoutMs       = 60000;
+    constexpr ULONGLONG kResultsTimeoutMs       = 60000;   // solo se la schermata dei risultati non si apre mai
+    constexpr ULONGLONG kAfterCompleteMs        = 10000;   // PostEventComplete ricevuto ma il gioco non esce
+    constexpr uint32_t  kReqPostEventStart = 0x4B9F40, kReqPostEventComplete = 0x4B9F20;   // handler Request(...), cdecl(arg)
     constexpr ULONGLONG kGoalFollowupMs         = 1500;
     constexpr ULONGLONG kResultsWindowAfterExit = 30000;
     constexpr ULONGLONG kWatchPeriodMs          = 200;
@@ -90,6 +92,21 @@ namespace Mod::Pursuit {
     static ULONGLONG g_aiPursuitGoneMs = 0;
     static bool g_resultsPhase = false;
     static ULONGLONG g_resultsStartMs = 0;
+    // Stato della schermata post-inseguimento (Request "PostEventStart" / "PostEventComplete" da ResultsScreen.gfx):
+    // finche' e' aperta (anche ferma, o con la finestra delle skill) non viene mai chiusa per timeout.
+    static std::atomic<bool> g_postEventShown{ false };
+    static std::atomic<ULONGLONG> g_postEventDoneMs{ 0 };
+    using PostEventReq_t = uintptr_t(__cdecl*)(void*);
+    static PostEventReq_t g_origPostEventStart = nullptr, g_origPostEventComplete = nullptr;
+    static uintptr_t __cdecl PostEventStartHook(void* arg) {
+        if (!g_postEventShown.exchange(true)) LOG("[results] schermata dei risultati aperta (PostEventStart)");
+        return g_origPostEventStart(arg);
+    }
+    static uintptr_t __cdecl PostEventCompleteHook(void* arg) {
+        g_postEventDoneMs.store(GetTickCount64());
+        LOG("[results] schermata dei risultati chiusa dal giocatore (PostEventComplete)");
+        return g_origPostEventComplete(arg);
+    }
     static uint32_t g_exitCallsAtResults = 0;
     static ULONGLONG g_gadgetReplayDueMs = 0;
     static ULONGLONG g_nextWatchMs = 0;
@@ -126,6 +143,40 @@ namespace Mod::Pursuit {
     static char SetGadgetVisible(const char* name, int show) {
         __try { return reinterpret_cast<char(__stdcall*)(const char*, int)>(Addr(Ida::SetGadgetVisible))(name, show); }
         __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+    }
+
+    // Treasure hunt: its HUD and its gems/areas on the map are suspended while our pursuit runs.
+    static bool g_treasureHudHidden = false;
+    static ULONGLONG g_treasureTickMs = 0;
+    constexpr ULONGLONG kTreasureTickMs = 1000;
+
+    static void HideTreasureHunt(ULONGLONG now, bool log) {
+        g_treasureTickMs = now;
+        char r = SetGadgetVisible("TreasureHud", 0);     // 1 = the gadget exists (and is now hidden)
+        if (r == 1) g_treasureHudHidden = true;
+        int n = MapIcons::HideTreasure();
+        if (log) LOG("[treasure] suspended: HUD %s, %d map icon(s) hidden", r == 1 ? "hidden" : "not loaded", n);
+        (void)n;
+    }
+
+    static void SuspendTreasureHunt(ULONGLONG now) {
+        if (!Features::On("treasure")) return;
+        g_treasureHudHidden = false;
+        HideTreasureHunt(now, true);
+    }
+
+    static void TickTreasureHunt(ULONGLONG now) {
+        if (!Features::On("treasure") || now - g_treasureTickMs < kTreasureTickMs) return;
+        HideTreasureHunt(now, false);
+    }
+
+    static void ResumeTreasureHunt() {
+        if (!Features::On("treasure")) return;
+        if (g_treasureHudHidden) SetGadgetVisible("TreasureHud", 1);
+        int n = MapIcons::RestoreTreasure();
+        LOG("[treasure] resumed: HUD %s, %d map icon(s) shown", g_treasureHudHidden ? "shown" : "untouched", n);
+        (void)n;
+        g_treasureHudHidden = false;
     }
 
     static void ShowPursuitGadgets() {
@@ -503,6 +554,7 @@ namespace Mod::Pursuit {
         if (Features::On("music")) Music::ApplyPursuit(g_cfgSlots[0]);
         if (Features::On("mapicons")) MapIcons::EnterPursuit();
         if (Features::On("markers")) MarkerFx::Hide();
+        SuspendTreasureHunt(now);
         Guard::NoteLaunch(GetTickCount64());
         bool ok = LaunchPursuit(heat);
         LOG("[pursuit] LaunchPursuit %s", ok ? "called" : "FAILED");
@@ -550,6 +602,8 @@ namespace Mod::Pursuit {
         (void)r;
         g_resultsPhase = true;
         g_resultsStartMs = now;
+        g_postEventShown.store(false);
+        g_postEventDoneMs.store(0);
         SetActiveFlags();
     }
 
@@ -565,6 +619,7 @@ namespace Mod::Pursuit {
         SpotFx::Off();
         MapIcons::ExitPursuit();
         MarkerFx::Restore();
+        ResumeTreasureHunt();
         g_resultsWindowUntilMs.store(GetTickCount64() + kResultsWindowAfterExit);
         g_modeOverride.store(false);
         if (FsmIndex() == kFsmPursuit) CallSetFsm(kFsmFreeroam);
@@ -587,6 +642,7 @@ namespace Mod::Pursuit {
             LOG("[results] real event started -- our results window closed");
         }
         if (!g_active) { HeatTimer::Tick(now, false, -1.0f); return; }
+        TickTreasureHunt(now);
         if (g_resultsPhase) {
             HeatTimer::Tick(now, false, -1.0f);
             if (::Mod::Log::Enabled()) {
@@ -597,8 +653,10 @@ namespace Mod::Pursuit {
                         (now - g_resultsStartMs) / 1000, FsmIndex(), Hooks::ExitPursuitModeCalls(), c.ok ? "ok" : "GONE");
                 }
             }
+            const ULONGLONG done = g_postEventDoneMs.load();
             if (Hooks::ExitPursuitModeCalls() != g_exitCallsAtResults) EndPursuit("results screen closed", false);
-            else if (now - g_resultsStartMs >= kResultsTimeoutMs) EndPursuit("results timeout", true);
+            else if (done && now - done >= kAfterCompleteMs) EndPursuit("results completed, forcing exit", true);
+            else if (!g_postEventShown.load() && now - g_resultsStartMs >= kResultsTimeoutMs) EndPursuit("results screen never shown (timeout)", true);
             return;
         }
         if (!c.ok) return;
@@ -650,6 +708,7 @@ namespace Mod::Pursuit {
                 
                 if (g_statBusted) {
                      PlayerSetHeat(kMinHeat);
+                     HeatTimer::ResetSaved(static_cast<float>(kMinHeat));
                 }
                 
                 Results::ChaseOver();
@@ -714,6 +773,10 @@ namespace Mod::Pursuit {
         Hooks::Attach(reinterpret_cast<void**>(&g_origRoadblockAdd), reinterpret_cast<void*>(RoadblockAddHook), "roadblock add vehicle");
         g_origRoadblockUpdate = reinterpret_cast<RoadblockUpdate_t>(Addr(kRoadblockUpdate));
         Hooks::Attach(reinterpret_cast<void**>(&g_origRoadblockUpdate), reinterpret_cast<void*>(RoadblockUpdateHook), "roadblock update (dodge)");
+        g_origPostEventStart = reinterpret_cast<PostEventReq_t>(Addr(kReqPostEventStart));
+        Hooks::Attach(reinterpret_cast<void**>(&g_origPostEventStart), reinterpret_cast<void*>(PostEventStartHook), "request PostEventStart");
+        g_origPostEventComplete = reinterpret_cast<PostEventReq_t>(Addr(kReqPostEventComplete));
+        Hooks::Attach(reinterpret_cast<void**>(&g_origPostEventComplete), reinterpret_cast<void*>(PostEventCompleteHook), "request PostEventComplete");
     }
 
     void Remove() {
@@ -721,5 +784,7 @@ namespace Mod::Pursuit {
         Hooks::Detach(reinterpret_cast<void**>(&g_origModeGetter), reinterpret_cast<void*>(ModeGetterHook));
         if (g_origRoadblockAdd) Hooks::Detach(reinterpret_cast<void**>(&g_origRoadblockAdd), reinterpret_cast<void*>(RoadblockAddHook));
         if (g_origRoadblockUpdate) Hooks::Detach(reinterpret_cast<void**>(&g_origRoadblockUpdate), reinterpret_cast<void*>(RoadblockUpdateHook));
+        if (g_origPostEventStart) Hooks::Detach(reinterpret_cast<void**>(&g_origPostEventStart), reinterpret_cast<void*>(PostEventStartHook));
+        if (g_origPostEventComplete) Hooks::Detach(reinterpret_cast<void**>(&g_origPostEventComplete), reinterpret_cast<void*>(PostEventCompleteHook));
     }
 }

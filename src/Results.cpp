@@ -31,6 +31,14 @@ namespace Mod::Results {
     static char g_str[kEntrantWords][64] = {};
     static bool g_valid = false;
 
+    static volatile LONG g_playerLevel = 0;
+    // Persona attuale (FEPlayerPersona: +0x18 PersonaId, +0x2C Level, +0x30 IsLocal, +0x34 PersonaName).
+    // Il template dell'entrant viene da un risultato reale e puo' appartenere a un'altra persona: senza l'id
+    // giusto RenderLocalVehicleByPersonaId non trova l'auto e la vista 3D del post-inseguimento resta vuota.
+    constexpr uint32_t kPersonaIdOff = 0x18, kPersonaLevelOff = 0x2C, kPersonaLocalOff = 0x30, kPersonaNameOff = 0x34;
+    static volatile LONG g_personaId = 0;
+    static char g_personaName[64] = {};
+
     static std::string TemplatePath() { return ModuleDir() + "NFSWorldPursuitProbe_entrant.txt"; }
 
     static void SaveTemplate() {
@@ -290,6 +298,15 @@ namespace Mod::Results {
         return written;
     }
 
+    // Id della persona in uso secondo il gioco (sub_43FDD0, 64 bit in edx:eax; 0 se non disponibile).
+    static uint32_t CurrentPersonaId() {
+        unsigned long long id = 0;
+        __try { id = reinterpret_cast<unsigned long long(__cdecl*)()>(Addr(0x43FDD0))(); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { id = 0; }
+        if (id == 0 || id > 0x7FFFFFFFULL) return 0;
+        return static_cast<uint32_t>(id);
+    }
+
     static bool FillPacket(uint32_t packet) {
         const uint32_t ent = packet + kPacketEntrant;
         const uint32_t empty = Addr32(Ida::EmptyString), vtRating = Addr32(Ida::RatingVtable);
@@ -318,6 +335,21 @@ namespace Mod::Results {
                     e[i - 1] = static_cast<uint32_t>(n);
                 }
             }
+            // persona attuale al posto di quella del template (id per la vista 3D dell'auto, nome e livello).
+            // L'id viene chiesto al gioco (stessa funzione che usa la vista 3D, 0x43FDD0), cosi' e' giusto anche
+            // subito dopo un cambio di pilota; nome e livello solo se il serializzatore ha visto la stessa persona.
+            if (Features::On("localpersona")) {
+                const uint32_t cur = CurrentPersonaId();
+                const uint32_t id = cur ? cur : static_cast<uint32_t>(g_personaId);
+                if (id) {
+                    e[kPersonaIdOff / 4] = id;
+                    *reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(ent + kPersonaLocalOff)) = 1;
+                    if (static_cast<uint32_t>(g_personaId) == id) {
+                        if (g_playerLevel > 0) e[kPersonaLevelOff / 4] = static_cast<uint32_t>(g_playerLevel);
+                        if (g_personaName[0]) AssignString(ent + kPersonaNameOff, g_personaName);
+                    }
+                }
+            }
             *reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(packet + kPacketHasArbitrated)) = 1;
             e[E::Rank / 4] = 1;
             e[E::FinishReason / 4] = (st.busted && Features::On("busted")) ? kFinishBusted : kFinishEvaded;
@@ -338,6 +370,7 @@ namespace Mod::Results {
             *F32(ent, E::TopSpeed) = 0.0f;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+        LOG("[results] persona nel pacchetto: id corrente %u, id visto dal serializzatore %ld", CurrentPersonaId(), static_cast<long>(g_personaId));
         LOG("[results] packet 0x%08X: %s, duration %.1fs, %u cop(s), heat %.2f, template %s", packet, st.busted ? "BUSTED" : "EVADED",
             duration, cops, st.heat, g_valid ? "yes" : "no");
         return true;
@@ -365,14 +398,20 @@ namespace Mod::Results {
                        kGameAllocPool = 0xC81794, kStringFromC = 0x403770;
     static ULONGLONG g_arbCompletedDueMs = 0;
 
-    static volatile LONG g_playerLevel = 0;
     static uint32_t g_origPersonaSer = 0;
     static void __stdcall OnPersonaSerialize(uint32_t persona) {
-        uint32_t lvl = 0, w = 0;
+        uint32_t lvl = 0, w = 0, id = 0, nb = 0, ne = 0;
         if (Pursuit::InResultsWindow()) return;
         if (!ReadU32(persona + 44, lvl) || !ReadU32(persona + 48, w) || !(w & 0xFF) || lvl == 0 || lvl > 100) return;
         if (InterlockedExchange(&g_playerLevel, static_cast<LONG>(lvl)) != static_cast<LONG>(lvl))
             LOG("[results] persona level %u", lvl);
+        if (ReadU32(persona + kPersonaIdOff, id) && id && id < 0x7FFFFFFF &&
+            InterlockedExchange(&g_personaId, static_cast<LONG>(id)) != static_cast<LONG>(id))
+            LOG("[results] persona id %u", id);
+        if (ReadU32(persona + kPersonaNameOff, nb) && ReadU32(persona + kPersonaNameOff + 4, ne) && nb && ne > nb && ne - nb < 63) {
+            char tmp[64] = {};
+            if (CopyBytes(tmp, nb, ne - nb)) { tmp[ne - nb] = 0; strcpy_s(g_personaName, tmp); }
+        }
     }
     static __declspec(naked) void PersonaSerStub() {
         __asm {
@@ -410,6 +449,18 @@ namespace Mod::Results {
         };
         for (const M& x : m) add(x.type, "Pursuit", static_cast<int>(baseRep * x.stat * x.mul), static_cast<int>(baseCash * x.stat * x.mul));
         return r;
+    }
+
+    // Team escape e altri inseguimenti a evento: stessa formula delle parti "Pursuit", con le statistiche
+    // lette dall'HUD dell'evento (il livello di heat non cambia durante l'evento e non produce aumenti).
+    int EventRepSoFar(const ::Mod::Stats::Snapshot& hs) {
+        const double baseRep = 35.0 * PlayerLevel();
+        const double stat[4] = { static_cast<double>(hs.copsDeployed), static_cast<double>(hs.copsDisabled),
+                                 static_cast<double>(hs.copsRammed), static_cast<double>(hs.costToState) };
+        const double mul[4] = { 0.025, 0.1, 0.05, 0.00005 };
+        int rep = 0;
+        for (int i = 0; i < 4; ++i) rep += static_cast<int>(baseRep * stat[i] * mul[i]);
+        return rep;
     }
 
     int PursuitRepSoFar() {

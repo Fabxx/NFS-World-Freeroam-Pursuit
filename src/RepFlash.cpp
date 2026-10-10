@@ -2,7 +2,9 @@
 // L'ASI calcola la REP guadagnata finora con la stessa formula della schermata dei risultati; quando sale,
 // invia l'aumento a flashers.gfx (flasherController.AddRepBonus), che lo mostra accanto al flasher.
 //
-// v0.4b: l'invio non e' piu' immediato.
+// v0.4b: funziona anche negli inseguimenti degli eventi (team escape): le statistiche arrivano dallo stesso
+// HUD (UpdateCopInfo) tramite Stats::OnHud -> PollEvent, con la stessa formula della REP "Pursuit".
+// L'invio non e' piu' immediato.
 //  - la REP calcolata viene accumulata e inviata solo quando il calcolo si e' stabilizzato (kSettleMs senza
 //    nuovi aumenti), cosi' un evento che fa salire la REP in piu' passi arriva come un unico "+N";
 //  - l'aumento viene legato al flasher dell'evento (quello aggiunto poco prima dell'aumento, o il primo aggiunto
@@ -59,7 +61,6 @@ namespace Mod::RepFlash {
     static ULONGLONG g_firstGainMs = 0, g_lastGainMs = 0;
     static uint32_t g_seqAtGain = 0;               // g_addSeq al primo aumento non ancora legato
     static uint32_t g_target = 0;                  // seq del flasher a cui va la REP (0 = non legato)
-    static ULONGLONG g_pursuitStart = 0;
 
     struct Lock {
         Lock() { if (g_csInit) EnterCriticalSection(&g_cs); }
@@ -196,14 +197,24 @@ namespace Mod::RepFlash {
         if (sent) ResetPending();
     }
 
+    // Chiave della sessione: inizio dell'inseguimento freeroam, oppure sessione dell'evento (bit alto) per i team escape.
+    static ULONGLONG g_session = 0;
+    static void Run(ULONGLONG session, int rep) {
+        const ULONGLONG now = GetTickCount64();
+        Lock l;
+        if (session != g_session) { g_session = session; g_lastRep = -1; ResetPending(); }
+        Process(rep, now);
+    }
+
     void Poll() {
         if (!Pursuit::IsActive() || !Features::On("repflasher")) { Lock l; g_lastRep = -1; ResetPending(); return; }
-        const ULONGLONG now = GetTickCount64();
         const ULONGLONG start = Pursuit::GetStats().startMs;
-        const int rep = Results::PursuitRepSoFar();
-        Lock l;
-        if (start != g_pursuitStart) { g_pursuitStart = start; g_lastRep = -1; ResetPending(); }
-        Process(rep, now);
+        Run(start, Results::PursuitRepSoFar());
+    }
+
+    void PollEvent(const ::Mod::Stats::Snapshot& hs, uint32_t session) {
+        if (!Features::On("repflasher") || !Features::On("eventrepflasher")) return;
+        Run(0x8000000000000000ULL | session, Results::EventRepSoFar(hs));
     }
 
     void Install() {

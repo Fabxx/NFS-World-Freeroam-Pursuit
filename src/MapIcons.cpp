@@ -41,7 +41,7 @@ namespace Mod::MapIcons {
 
     constexpr uint32_t kPoiEntityVt = 0xBC2210;
     constexpr uint32_t kEntityList = 52, kEntityVisible = 24, kEntityKind = 100;
-    enum : uint32_t { kKindCooldown = 0, kKindBreaker = 1 };
+    enum : uint32_t { kKindCooldown = 0, kKindBreaker = 1, kKindTreasureIcon = 3, kKindTreasureArea = 4 };
     constexpr int kMaxTouched = 512;
     static uint32_t g_touched[kMaxTouched];
     static int g_touchedCount = 0;
@@ -105,6 +105,49 @@ namespace Mod::MapIcons {
             SetEntityVisible(g_touched[i], 0);
         }
         g_touchedCount = 0;
+    }
+
+    // Treasure hunt gems / search areas on the map and minimap (POI kinds 3 and 4, see 0x4A9A40):
+    // hidden while our pursuit runs, the ones we hid are shown again afterwards.
+    constexpr int kMaxTreasure = 256;
+    static uint32_t g_treasure[kMaxTreasure];
+    static int g_treasureCount = 0;
+
+    int HideTreasure() {
+        uint32_t mgr = 0, obj = 0, it = 0, end = 0;
+        if (!ReadU32(Addr(kMapManager), mgr) || !mgr || !ReadU32(mgr + 4, obj) || !obj) return -1;
+        if (!ReadU32(obj + kEntityList, it) || !ReadU32(obj + kEntityList + 4, end) || !it || end < it || end - it > 0x10000) return -1;
+        const uint32_t vtWant = Addr32(kPoiEntityVt);
+        int n = 0;
+        __try {
+            for (; it < end; it += 4) {
+                uint32_t e = 0, vt = 0, k = 0;
+                if (!ReadU32(it, e) || !e || !ReadU32(e, vt) || vt != vtWant || !ReadU32(e + kEntityKind, k)) continue;
+                if (k != kKindTreasureIcon && k != kKindTreasureArea) continue;
+                if (*reinterpret_cast<volatile uint8_t*>(static_cast<uintptr_t>(e + kEntityVisible)) == 0) continue;
+                SetEntityVisible(e, 0);
+                bool known = false;
+                for (int i = 0; i < g_treasureCount; ++i) if (g_treasure[i] == e) { known = true; break; }
+                if (!known && g_treasureCount < kMaxTreasure) g_treasure[g_treasureCount++] = e;
+                ++n;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        return n;
+    }
+
+    int RestoreTreasure() {
+        const uint32_t vtWant = Addr32(kPoiEntityVt);
+        int n = 0;
+        for (int i = 0; i < g_treasureCount; ++i) {
+            uint32_t vt = 0, k = 0;
+            if (!ReadU32(g_treasure[i], vt) || vt != vtWant || !ReadU32(g_treasure[i] + kEntityKind, k)) continue;
+            if (k != kKindTreasureIcon && k != kKindTreasureArea) continue;
+            SetEntityVisible(g_treasure[i], 1);
+            ++n;
+        }
+        g_treasureCount = 0;
+        return n;
     }
 
     static void HideEvents() {

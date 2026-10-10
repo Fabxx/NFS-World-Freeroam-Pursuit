@@ -12,14 +12,37 @@ namespace Mod::Stats {
     static volatile LONG g_deployed = 0, g_disabled = 0, g_rammed = 0, g_cost = 0, g_valid = 0;
     static uint32_t g_orig = 0;
 
+    // Team escape / inseguimenti a evento: l'HUD e' lo stesso, ma l'inseguimento non e' il nostro.
+    // Le statistiche vanno in un contatore separato (non toccano i risultati del freeroam) e servono solo
+    // a calcolare la REP da mostrare nei flasher.
+    constexpr ULONGLONG kEventGapMs = 5000;       // nessun aggiornamento dell'HUD per questo tempo = nuovo evento
+    static uint32_t g_evHud = 0, g_evSession = 0;
+    static ULONGLONG g_evLastMs = 0;
+    static Snapshot g_ev = {};
+
+    static void OnEventHud(uint32_t hud, uint32_t dep, uint32_t dis, uint32_t ram, LONG cost) {
+        const ULONGLONG now = GetTickCount64();
+        if (hud != g_evHud || now - g_evLastMs > kEventGapMs || dep < g_ev.copsDeployed / 2) {
+            g_evHud = hud; ++g_evSession; g_ev = {};
+            LOG("[stats] HUD inseguimento di un evento (team escape): sessione %u", g_evSession);
+        }
+        g_evLastMs = now;
+        if (dep > g_ev.copsDeployed) g_ev.copsDeployed = dep;
+        if (dis > g_ev.copsDisabled) g_ev.copsDisabled = dis;
+        if (ram > g_ev.copsRammed) g_ev.copsRammed = ram;
+        if (static_cast<uint32_t>(cost) > g_ev.costToState) g_ev.costToState = static_cast<uint32_t>(cost);
+        g_ev.valid = true;
+        RepFlash::PollEvent(g_ev, g_evSession);
+    }
+
     static void __stdcall OnHud(uint32_t hud) {
-        if (!Pursuit::IsActive()) return;
         uint32_t b = 0, e = 0, dep = 0, dis = 0, ram = 0, costBits = 0;
         if (!ReadU32(hud + 120, b) || !ReadU32(hud + 124, e) || !b || e < b + 64) return;
         if (!ReadU32(b + 24, dep) || !ReadU32(b + 28, dis) || !ReadU32(b + 32, ram) || !ReadU32(b + 36, costBits)) return;
         float cost = 0.0f;
         memcpy(&cost, &costBits, 4);
         if (dep > 100 || dis > 100 || ram > 100 || !(cost >= 0.0f && cost < 1.0e7f)) return;
+        if (!Pursuit::IsActive()) { OnEventHud(hud, dep, dis, ram, static_cast<LONG>(cost)); return; }
         if (static_cast<LONG>(dep) > g_deployed) g_deployed = static_cast<LONG>(dep);
         if (static_cast<LONG>(dis) > g_disabled) g_disabled = static_cast<LONG>(dis);
         if (static_cast<LONG>(ram) > g_rammed) g_rammed = static_cast<LONG>(ram);
