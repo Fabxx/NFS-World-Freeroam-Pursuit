@@ -4,14 +4,10 @@
 //
 // v0.4b: funziona anche negli inseguimenti degli eventi (team escape): le statistiche arrivano dallo stesso
 // HUD (UpdateCopInfo) tramite Stats::OnHud -> PollEvent, con la stessa formula della REP "Pursuit".
-// L'invio non e' piu' immediato.
-//  - la REP calcolata viene accumulata e inviata solo quando il calcolo si e' stabilizzato (kSettleMs senza
-//    nuovi aumenti), cosi' un evento che fa salire la REP in piu' passi arriva come un unico "+N";
-//  - l'aumento viene legato al flasher dell'evento (quello aggiunto poco prima dell'aumento, o il primo aggiunto
-//    dopo) e inviato solo quando quel flasher e' il messaggio corrente, cioe' dopo che i flasher in coda prima
-//    di lui sono stati mostrati e chiusi. Lo stato della coda arriva dai callback OnFlasherStarted /
-//    OnFlasherFinished del gadget (sub_482E70): la REP non viene mai inviata mentre e' a schermo un messaggio
-//    precedente, e non finisce piu' nel "pending" di flashers.gfx dove poteva scadere o finire sul flasher sbagliato.
+// L'invio non e' piu' immediato: ogni calcolo della REP concluso (kSettleMs senza nuovi aumenti) va in coda e
+// le voci vengono inviate una per messaggio, nell'ordine, al prossimo flasher che compare a schermo (stato
+// della coda dai callback OnFlasherStarted / OnFlasherFinished del gadget, sub_482E70). Un messaggio riceve
+// al massimo una REP: azioni ravvicinate restano in coda e aspettano i messaggi successivi.
 #include "RepFlash.h"
 #include "Game.h"
 #include "Hooks.h"
@@ -29,11 +25,8 @@ namespace Mod::RepFlash {
     constexpr uint32_t kValueNumber = 3;
 
     constexpr ULONGLONG kSettleMs = 250;         // la REP deve restare ferma per questo tempo prima dell'invio
-    constexpr ULONGLONG kBindWindowMs = 1500;    // un flasher aggiunto fino a questo tempo prima dell'aumento e' "il suo"
     constexpr ULONGLONG kShowDelayMs = 60;       // attende che Show() del flasher sia completato
     constexpr ULONGLONG kShowWindowMs = 1300;    // flashers.gfx accetta la REP sul flasher corrente per 1500 ms
-    constexpr ULONGLONG kNearMs = 400;           // flasher aggiunto cosi' vicino prima dell'aumento: e' sicuramente il suo
-    constexpr ULONGLONG kWaitAfterMs = 500;      // altrimenti aspetta questo tempo un eventuale flasher aggiunto dopo
     constexpr uint32_t kRing = 64;
 
     struct GFxValue { void* object; uint32_t type; double number; };
@@ -59,8 +52,7 @@ namespace Mod::RepFlash {
     static int g_lastRep = -1;
     static int g_pending = 0;
     static ULONGLONG g_firstGainMs = 0, g_lastGainMs = 0;
-    static uint32_t g_seqAtGain = 0;               // g_addSeq al primo aumento non ancora legato
-    static uint32_t g_target = 0;                  // seq del flasher a cui va la REP (0 = non legato)
+    static uint32_t g_lastSentSeq = 0;             // ultimo flasher che ha gia' ricevuto la sua REP: non ne riceve altra
 
     struct Lock {
         Lock() { if (g_csInit) EnterCriticalSection(&g_cs); }
@@ -69,10 +61,7 @@ namespace Mod::RepFlash {
         Lock& operator=(const Lock&) = delete;
     };
 
-    static void ResetPending() { g_pending = 0; g_target = 0; g_seqAtGain = 0; g_firstGainMs = g_lastGainMs = 0; }
-
-    // la REP non legata ricomincia a cercare il proprio flasher da "adesso"
-    static void Unbind(ULONGLONG now) { g_target = 0; g_seqAtGain = g_addSeq; g_firstGainMs = now; }
+    static void ResetPending();
 
     static void OnAdded() {
         Lock l;
@@ -130,71 +119,63 @@ namespace Mod::RepFlash {
         return true;
     }
 
-    // Il flasher dell'evento e' quello aggiunto piu' vicino nel tempo al primo aumento della REP:
-    //  - "prima": l'ultimo aggiunto prima dell'aumento (se non e' gia' stato chiuso), fino a kBindWindowMs prima;
-    //  - "dopo": il primo aggiunto dopo l'aumento (il flasher puo' arrivare dopo l'aggiornamento delle statistiche).
-    // Se c'e' solo un candidato "prima" ma lontano nel tempo, aspetta un po' l'eventuale flasher "dopo".
-    static void TryBind(ULONGLONG now) {
-        if (g_target) return;
-        const uint32_t s = g_seqAtGain;
-        uint32_t before = 0, after = 0;
-        ULONGLONG dtBefore = 0, dtAfter = 0;
-        if (s && s + kRing > g_addSeq && (s > g_startSeq || s == g_curSeq)) {
-            const ULONGLONG t = g_addTime[s % kRing];
-            if (g_firstGainMs >= t && g_firstGainMs - t <= kBindWindowMs) { before = s; dtBefore = g_firstGainMs - t; }
-        }
-        if (g_addSeq > s) {
-            after = s + 1;
-            const ULONGLONG t = g_addTime[after % kRing];
-            dtAfter = t >= g_firstGainMs ? t - g_firstGainMs : 0;
-        }
-        if (after && dtAfter <= kBindWindowMs) { g_target = (before && dtBefore < dtAfter) ? before : after; return; }
-        if (before) {
-            if (dtBefore <= kNearMs || now - g_firstGainMs >= kWaitAfterMs) g_target = before;
+    // Coda delle REP calcolate: ogni calcolo concluso (kSettleMs senza nuovi aumenti) diventa una voce;
+    // le voci vengono inviate una per messaggio, in ordine, ciascuna al prossimo flasher che compare a schermo.
+    // Un flasher che ha gia' ricevuto (o saltato) la sua REP non ne riceve altre, quindi azioni ravvicinate
+    // non si sommano piu' sullo stesso messaggio.
+    constexpr int kQueueMax = 16;
+    struct Entry { int amount; ULONGLONG gainMs; };
+    static Entry g_queue[kQueueMax];
+    static int g_qHead = 0, g_qCount = 0;
+
+    static void QueuePush(int amount, ULONGLONG gainMs) {
+        if (g_qCount == kQueueMax) {                 // coda piena: si somma all'ultima voce
+            g_queue[(g_qHead + g_qCount - 1) % kQueueMax].amount += amount;
             return;
         }
-        if (after) g_target = after;                 // nessun flasher vicino: il primo che arriva
+        g_queue[(g_qHead + g_qCount) % kQueueMax] = Entry{ amount, gainMs };
+        ++g_qCount;
     }
+
+    static void ResetPending() { g_pending = 0; g_firstGainMs = g_lastGainMs = 0; g_qHead = 0; g_qCount = 0; }
 
     static void Process(int rep, ULONGLONG now) {
         if (g_lastRep < 0 || rep < g_lastRep) { g_lastRep = rep; ResetPending(); return; }
         if (rep > g_lastRep) {
             const int gain = rep - g_lastRep;
             g_lastRep = rep;
-            if (g_pending == 0) { g_seqAtGain = g_addSeq; g_target = 0; g_firstGainMs = now; }
+            if (g_pending == 0) g_firstGainMs = now;
             g_pending += gain;
             g_lastGainMs = now;
-            LOG("[repflash] +%d REP calcolata (totale inseguimento %d), in attesa %d", gain, rep, g_pending);
-        }
-        if (g_pending <= 0) return;
-
-        // 1) aspetta che il calcolo della REP sia finito
-        if (now - g_lastGainMs < kSettleMs) return;
-
-        // 2) trova il flasher dell'evento (se non e' ancora arrivato, aspetta)
-        TryBind(now);
-        if (!g_target) return;
-
-        // il flasher legato e' gia' stato mostrato e chiuso: la REP va al prossimo messaggio
-        if (g_target <= g_startSeq && g_target != g_curSeq) {
-            LOG("[repflash] flasher #%u gia' chiuso, REP %d al prossimo messaggio", g_target, g_pending);
-            Unbind(now);
-            return;
+            LOG("[repflash] +%d REP calcolata (totale inseguimento %d)", gain, rep);
         }
 
-        // 3) aspetta che i messaggi precedenti siano spariti e che il suo sia a schermo
-        if (g_curSeq != g_target) return;
+        // 1) calcolo concluso -> nuova voce in coda
+        if (g_pending > 0 && now - g_lastGainMs >= kSettleMs) {
+            QueuePush(g_pending, g_firstGainMs);
+            LOG("[repflash] REP %d in coda (%d in attesa)", g_pending, g_qCount);
+            g_pending = 0; g_firstGainMs = g_lastGainMs = 0;
+        }
+        if (g_qCount == 0) return;
+
+        // 2) la prima voce va al prossimo messaggio che compare (mai a uno che ha gia' avuto la sua REP)
+        if (!g_curSeq || g_curSeq <= g_lastSentSeq) return;
         const ULONGLONG shown = now - g_curStartMs;
         if (shown < kShowDelayMs) return;
-        if (shown > kShowWindowMs) {
-            LOG("[repflash] flasher #%u a schermo da troppo, REP %d al prossimo messaggio", g_target, g_pending);
-            Unbind(now);
+        if (shown > kShowWindowMs) {                 // a schermo da troppo: flashers.gfx non la mostrerebbe piu'
+            LOG("[repflash] flasher #%u a schermo da troppo, la REP aspetta il prossimo messaggio", g_curSeq);
+            g_lastSentSeq = g_curSeq;
             return;
         }
-        const int amount = g_pending;
-        const bool sent = Send(amount);
-        LOG("[repflash] +%d REP inviata al flasher #%u%s", amount, g_target, sent ? "" : " (gadget non pronto, ritento)");
-        if (sent) ResetPending();
+        const Entry e = g_queue[g_qHead];
+        const bool sent = Send(e.amount);
+        LOG("[repflash] +%d REP inviata al flasher #%u%s (%d ancora in coda)", e.amount, g_curSeq,
+            sent ? "" : " (gadget non pronto, ritento)", sent ? g_qCount - 1 : g_qCount);
+        if (sent) {
+            g_lastSentSeq = g_curSeq;
+            g_qHead = (g_qHead + 1) % kQueueMax;
+            --g_qCount;
+        }
     }
 
     // Chiave della sessione: inizio dell'inseguimento freeroam, oppure sessione dell'evento (bit alto) per i team escape.
