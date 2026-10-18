@@ -14,6 +14,7 @@
 #include "HeatTimer.h"
 #include "Log.h"
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -116,6 +117,7 @@ namespace Mod::Pursuit {
     static uint32_t g_statMaxCops = 0;
     static bool g_statBusted = false;
     static float g_statHeat = 0.0f;
+    static float g_statTopSpeed = 0.0f;                     // m/s
     static uint8_t g_exitDummyThis[64] = {};
 
     using ModeGetter_t = int(__thiscall*)(void*);
@@ -426,6 +428,96 @@ namespace Mod::Pursuit {
     constexpr float kRoadblockHitRadius = 15.0f;
     constexpr int kMaxRoadblocks = 32;
     static volatile LONG g_rbDodged = 0;
+
+    // ---- strisce chiodate, infrazioni e velocita' massima (statistiche del profilo / schermata dei risultati)
+    // Strisce chiodate: un posto di blocco viene costruito da sub_8919F0 (this = posto di blocco); i suoi pezzi
+    // di tipo 3 sono strisce chiodate, caricate con il modello "XO_SpikeBelt_1b_DW_00" tramite sub_6E54C0.
+    // I posti di blocco costruiti con almeno una striscia vengono ricordati: superarne uno senza toccarlo
+    // (stesso controllo dei posti di blocco evitati) conta come striscia chiodata evitata.
+    constexpr uint32_t kRoadblockBuild = 0x8919F0, kModelLookup = 0x6E54C0;
+    constexpr int kSpikeBeltHash = -896929905;           // hash di "XO_SpikeBelt_1b_DW_00"
+    constexpr uint32_t kRoadblockIfaceOff = 76;          // sub_8945C0 chiama sub_8919F0 con this - 19 dword
+    constexpr int kMaxSpiked = 32;
+    static uint32_t g_spiked[kMaxSpiked] = {};
+    static volatile LONG g_spikedNext = 0;
+    static uint32_t g_building = 0;                      // posto di blocco in costruzione (thread del gioco)
+    static volatile LONG g_spikesDodged = 0;
+    // Infrazioni: sub_7955D0 (this = *0xD7AB10) aggiunge un bit alla maschera delle infrazioni del giocatore
+    // (eccesso di velocita', guida spericolata, ...). Si contano i tipi diversi commessi in questo inseguimento.
+    constexpr uint32_t kInfractionSet = 0x7955D0;
+    static volatile LONG g_infractionMask = 0;
+
+    using RoadblockBuild_t = char(__thiscall*)(void*, float*, int**, int, int, int, int, int, int, float, unsigned);
+    static RoadblockBuild_t g_origRoadblockBuild = nullptr;
+    using ModelLookup_t = bool(__cdecl*)(uint32_t*, const char*, int);
+    static ModelLookup_t g_origModelLookup = nullptr;
+    using InfractionSet_t = void(__thiscall*)(void*, int);
+    static InfractionSet_t g_origInfractionSet = nullptr;
+
+    static void ResetExtraStats() {
+        g_statTopSpeed = 0.0f;
+        g_spikesDodged = 0;
+        g_infractionMask = 0;
+        for (int i = 0; i < kMaxSpiked; ++i) g_spiked[i] = 0;
+    }
+
+    static bool IsSpiked(uint32_t rb) {
+        if (!rb) return false;
+        for (int i = 0; i < kMaxSpiked; ++i) {
+            const uint32_t s = g_spiked[i];
+            if (s && (s == rb || s + kRoadblockIfaceOff == rb || rb + kRoadblockIfaceOff == s)) return true;
+        }
+        return false;
+    }
+
+    static char __fastcall RoadblockBuildHook(void* self, void* /*edx*/, float* a2, int** a3, int a4, int a5, int a6, int a7,
+                                              int a8, int a9, float a10, unsigned a11) {
+        const uint32_t prev = g_building;
+        g_building = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(self));
+        char r = g_origRoadblockBuild(self, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+        g_building = prev;
+        return r;
+    }
+
+    static bool __cdecl ModelLookupHook(uint32_t* out, const char* name, int hash) {
+        if (hash == kSpikeBeltHash && g_building && !IsSpiked(g_building)) {
+            const LONG i = (InterlockedIncrement(&g_spikedNext) - 1) % kMaxSpiked;
+            g_spiked[i] = g_building;
+            LOG("[cops] roadblock 0x%08X built with spike strips", g_building);
+        }
+        return g_origModelLookup(out, name, hash);
+    }
+
+    static void __fastcall InfractionSetHook(void* self, void* /*edx*/, int flags) {
+        if (IsActive() && flags > 0) {
+            const LONG before = g_infractionMask;
+            InterlockedOr(&g_infractionMask, flags);
+            if ((before | flags) != before) LOG("[pursuit] infraction 0x%X (mask 0x%X)", flags, before | flags);
+        }
+        g_origInfractionSet(self, flags);
+    }
+
+    // Velocita' del giocatore (stesso metodo del trigger: ICollisionBody, vt[2] = vettore velocita').
+    static void SampleTopSpeed() {
+        uint32_t count = 0, base = 0, player = 0, table = 0, body = 0, vt = 0, fn = 0, vec = 0;
+        if (!ReadU32(Addr(Ida::LocalPlayerCount), count) || !count || !ReadU32(Addr(Ida::LocalPlayerBase), base) || !base ||
+            !ReadU32(base, player) || !player || !ReadU32(player + 4, table) || !table)
+            return;
+        float v[3] = {};
+        __try {
+            body = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(reinterpret_cast<void*(__thiscall*)(void*, void*)>(
+                Addr(Ida::QueryInterface))(reinterpret_cast<void*>(table), reinterpret_cast<void*>(Addr(Ida::KeyICollisionBody)))));
+            if (!body || !ReadU32(body, vt) || !ReadU32(vt + 8, fn) || !fn) return;
+            vec = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(reinterpret_cast<void*(__thiscall*)(void*)>(fn)(reinterpret_cast<void*>(body))));
+            if (!vec) return;
+            for (int i = 0; i < 3; ++i) v[i] = reinterpret_cast<volatile float*>(vec)[i];
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+        const float s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (s > g_statTopSpeed && s < 150.0f) g_statTopSpeed = s;     // > 540 km/h = lettura non valida
+    }
+
+    static uint32_t PopCount(uint32_t m) { uint32_t n = 0; while (m) { m &= m - 1; ++n; } return n; }
     using RoadblockUpdate_t = void*(__thiscall*)(void*, float);
     static RoadblockUpdate_t g_origRoadblockUpdate = nullptr;
 
@@ -480,11 +572,18 @@ namespace Mod::Pursuit {
             const LONG c = InterlockedIncrement(&g_rbDodged);
             LOG("[cops] roadblock 0x%08X dodged (%ld in this pursuit)", rb[i], c);
             (void)c;
+            if (IsSpiked(rb[i])) {
+                const LONG s = InterlockedIncrement(&g_spikesDodged);
+                LOG("[cops] spike strips of roadblock 0x%08X dodged (%ld in this pursuit)", rb[i], s);
+                (void)s;
+            }
         }
         return r;
     }
 
     uint32_t RoadblocksDodged() { return static_cast<uint32_t>(g_rbDodged); }
+    uint32_t SpikeStripsDodged() { return static_cast<uint32_t>(g_spikesDodged); }
+    uint32_t Infractions() { return PopCount(static_cast<uint32_t>(g_infractionMask)); }
 
     static bool IsRoadblockCop(uint32_t cop) {
         if (!cop || !Features::On("roadblockai")) return false;
@@ -544,6 +643,7 @@ namespace Mod::Pursuit {
         LOG("[pursuit] ---- step 1: LaunchPursuit(heat %d, car heat %.2f) ----", heat, carHeat);
         g_goalCount = 0;
         g_rbDodged = 0;
+        ResetExtraStats();
         g_statStartMs = now; g_statEndMs = 0; g_statMaxCops = 0; g_statBusted = false; g_statHeat = 0.0f;
         ::Mod::Stats::Reset();
         Results::PursuitStarted();
@@ -666,6 +766,7 @@ namespace Mod::Pursuit {
             if (force >= 0.0f) PlayerSetHeat(force);   // ritmo del calore della beta
         }
         if (c.pursuit && c.managed > g_statMaxCops) g_statMaxCops = c.managed;
+        if (c.pursuit) SampleTopSpeed();
         if (!g_resultsPhase && !g_aiPursuitGoneMs) MarkerFx::Tick();
         if (g_gadgetReplayDueMs && now >= g_gadgetReplayDueMs) {
             g_gadgetReplayDueMs = 0;
@@ -762,7 +863,10 @@ namespace Mod::Pursuit {
                GetTickCount64() < g_resultsWindowUntilMs.load(std::memory_order_relaxed);
     }
 
-    Stats GetStats() { return Stats{ g_statStartMs, g_statEndMs, g_statMaxCops, g_statBusted, g_statHeat }; }
+    Stats GetStats() {
+        return Stats{ g_statStartMs, g_statEndMs, g_statMaxCops, g_statBusted, g_statHeat,
+                      g_statTopSpeed, Infractions(), SpikeStripsDodged() };
+    }
 
     void Install() {
         Features::Load();
@@ -773,6 +877,12 @@ namespace Mod::Pursuit {
         Hooks::Attach(reinterpret_cast<void**>(&g_origRoadblockAdd), reinterpret_cast<void*>(RoadblockAddHook), "roadblock add vehicle");
         g_origRoadblockUpdate = reinterpret_cast<RoadblockUpdate_t>(Addr(kRoadblockUpdate));
         Hooks::Attach(reinterpret_cast<void**>(&g_origRoadblockUpdate), reinterpret_cast<void*>(RoadblockUpdateHook), "roadblock update (dodge)");
+        g_origRoadblockBuild = reinterpret_cast<RoadblockBuild_t>(Addr(kRoadblockBuild));
+        Hooks::Attach(reinterpret_cast<void**>(&g_origRoadblockBuild), reinterpret_cast<void*>(RoadblockBuildHook), "roadblock build (spike strips)");
+        g_origModelLookup = reinterpret_cast<ModelLookup_t>(Addr(kModelLookup));
+        Hooks::Attach(reinterpret_cast<void**>(&g_origModelLookup), reinterpret_cast<void*>(ModelLookupHook), "model lookup (spike strips)");
+        g_origInfractionSet = reinterpret_cast<InfractionSet_t>(Addr(kInfractionSet));
+        Hooks::Attach(reinterpret_cast<void**>(&g_origInfractionSet), reinterpret_cast<void*>(InfractionSetHook), "player infractions");
         g_origPostEventStart = reinterpret_cast<PostEventReq_t>(Addr(kReqPostEventStart));
         Hooks::Attach(reinterpret_cast<void**>(&g_origPostEventStart), reinterpret_cast<void*>(PostEventStartHook), "request PostEventStart");
         g_origPostEventComplete = reinterpret_cast<PostEventReq_t>(Addr(kReqPostEventComplete));
@@ -784,6 +894,9 @@ namespace Mod::Pursuit {
         Hooks::Detach(reinterpret_cast<void**>(&g_origModeGetter), reinterpret_cast<void*>(ModeGetterHook));
         if (g_origRoadblockAdd) Hooks::Detach(reinterpret_cast<void**>(&g_origRoadblockAdd), reinterpret_cast<void*>(RoadblockAddHook));
         if (g_origRoadblockUpdate) Hooks::Detach(reinterpret_cast<void**>(&g_origRoadblockUpdate), reinterpret_cast<void*>(RoadblockUpdateHook));
+        if (g_origRoadblockBuild) Hooks::Detach(reinterpret_cast<void**>(&g_origRoadblockBuild), reinterpret_cast<void*>(RoadblockBuildHook));
+        if (g_origModelLookup) Hooks::Detach(reinterpret_cast<void**>(&g_origModelLookup), reinterpret_cast<void*>(ModelLookupHook));
+        if (g_origInfractionSet) Hooks::Detach(reinterpret_cast<void**>(&g_origInfractionSet), reinterpret_cast<void*>(InfractionSetHook));
         if (g_origPostEventStart) Hooks::Detach(reinterpret_cast<void**>(&g_origPostEventStart), reinterpret_cast<void*>(PostEventStartHook));
         if (g_origPostEventComplete) Hooks::Detach(reinterpret_cast<void**>(&g_origPostEventComplete), reinterpret_cast<void*>(PostEventCompleteHook));
     }

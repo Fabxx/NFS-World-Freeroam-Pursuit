@@ -363,11 +363,11 @@ namespace Mod::Results {
             e[E::CopsRammed / 4] = hs.copsRammed;
             e[E::CostToState / 4] = hs.valid && hs.costToState ? hs.costToState : cops * kCostPerCop;
             *F32(ent, E::Heat) = 1.0f;
-            e[E::Infractions / 4] = 0;
+            e[E::Infractions / 4] = st.infractions;
             *F32(ent, E::LongestJump) = 0.0f;
             e[E::RoadBlocks / 4] = Features::On("roadblockhits") ? Pursuit::RoadblocksDodged() : 0;
-            e[E::SpikeStrips / 4] = 0;
-            *F32(ent, E::TopSpeed) = 0.0f;
+            e[E::SpikeStrips / 4] = st.spikeStripsDodged;
+            *F32(ent, E::TopSpeed) = st.topSpeed;
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
         LOG("[results] persona nel pacchetto: id corrente %u, id visto dal serializzatore %ld", CurrentPersonaId(), static_cast<long>(g_personaId));
@@ -628,7 +628,7 @@ namespace Mod::Results {
     }
 
     enum class Req { Reward, PowerupsReset, PowerupsGet };
-    struct HttpJob { Req kind; wchar_t method[8]; wchar_t path[256]; };
+    struct HttpJob { Req kind; wchar_t method[8]; wchar_t path[512]; };
     static volatile LONG g_profileRefresh = 0;
     static volatile ULONGLONG g_profileRefreshUntilMs = 0;
 
@@ -699,15 +699,27 @@ namespace Mod::Results {
         HttpJob* job = new HttpJob{};
         job->kind = kind;
         wcsncpy_s(job->method, method, _TRUNCATE);
-        MultiByteToWideChar(CP_ACP, 0, path, -1, job->path, 256);
+        MultiByteToWideChar(CP_ACP, 0, path, -1, job->path, 512);
         HANDLE t = CreateThread(nullptr, 0, HttpThread, job, 0, nullptr);
         if (t) CloseHandle(t); else delete job;
     }
 
-    static void SendRewards(const Rewards& r, bool busted, float heat, int lucky) {
-        char q[256];
-        snprintf(q, sizeof(q), "/Engine.svc/pursuitprobe/reward?busted=%d&cash=%d&rep=%d&heat=%.2f&item=%s&qty=6", busted ? 1 : 0,
-                 r.cash, r.rep, heat > 0 ? heat : 1.0f, (!busted && lucky >= 0) ? kLucky[lucky].tag : "");
+    // Le statistiche dell'inseguimento (stessi valori del pacchetto della schermata dei risultati) vengono
+    // mandate insieme ai premi: il modulo ProfileStats.js del server le usa per le statistiche del profilo.
+    static void SendRewards(const Rewards& r, bool busted, float heat, int lucky, const Pursuit::Stats& st) {
+        ULONGLONG endMs = st.endMs ? st.endMs : GetTickCount64();
+        unsigned durationMs = st.startMs && endMs > st.startMs ? static_cast<unsigned>(endMs - st.startMs) : 0;
+        uint32_t cops = st.maxCops ? st.maxCops : 1;
+        ::Mod::Stats::Snapshot hs = ::Mod::Stats::Get();
+        unsigned deployed = hs.valid && hs.copsDeployed ? hs.copsDeployed : cops;
+        unsigned cost = hs.valid && hs.costToState ? hs.costToState : cops * kCostPerCop;
+        unsigned roadblocks = Features::On("roadblockhits") ? Pursuit::RoadblocksDodged() : 0;
+        char q[512];
+        snprintf(q, sizeof(q), "/Engine.svc/pursuitprobe/reward?busted=%d&cash=%d&rep=%d&heat=%.2f&item=%s&qty=6"
+                 "&duration=%u&deployed=%u&disabled=%u&rammed=%u&cost=%u&roadblocks=%u&spikes=%u&infractions=%u&topspeed=%.2f",
+                 busted ? 1 : 0, r.cash, r.rep, heat > 0 ? heat : 1.0f, (!busted && lucky >= 0) ? kLucky[lucky].tag : "",
+                 durationMs, deployed, hs.copsDisabled, hs.copsRammed, cost, roadblocks, st.spikeStripsDodged, st.infractions,
+                 st.topSpeed);
         Http(Req::Reward, L"POST", q);
         LOG("[results] saving: %s", q);
     }
@@ -766,7 +778,7 @@ namespace Mod::Results {
         Pursuit::Stats st = Pursuit::GetStats();
         const Rewards& r = ScreenRewards(st);
         if (!st.busted && g_luckyIndex < 0) g_luckyIndex = static_cast<int>(GetTickCount64() % (sizeof(kLucky) / sizeof(kLucky[0])));
-        SendRewards(r, st.busted, st.heat, g_luckyIndex);
+        SendRewards(r, st.busted, st.heat, g_luckyIndex, st);
     }
 
     using ArbHandler_t = int(__cdecl*)(int*);
