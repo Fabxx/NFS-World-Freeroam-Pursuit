@@ -20,6 +20,12 @@ namespace Mod::Trigger {
     constexpr int       kNearestCopVt      = 44;
     constexpr int       kVelocityVt        = 8;
 
+    // The worker thread reads the cop manager and the player car: it must only do that in a stable
+    // freeroam. During freeroam <-> event transitions the game destroys and recreates those cars and
+    // scanning them from this thread crashed or broke the event loading (infinite loading).
+    constexpr uint32_t  kFsmFreeroam       = 1;
+    constexpr ULONGLONG kFreeroamSettleMs  = 3000;   // freeroam must be stable for this long before scanning
+
     static HANDLE g_thread = nullptr;
     static std::atomic<bool> g_stop{ false };
 
@@ -54,6 +60,18 @@ namespace Mod::Trigger {
         __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
     }
 
+    // true only when the game has been in the freeroam state for at least kFreeroamSettleMs
+    static bool FreeroamSettled(ULONGLONG now, ULONGLONG& freeroamSinceMs) {
+        uint32_t fsm = ReadU32Or(Addr(Ida::Fsm), 0xFFFFFFFF);
+        if (fsm != kFsmFreeroam) {
+            if (freeroamSinceMs) LOG("[trigger] left freeroam (FSM %u): cop scan paused", fsm);
+            freeroamSinceMs = 0;
+            return false;
+        }
+        if (!freeroamSinceMs) freeroamSinceMs = now;
+        return now - freeroamSinceMs >= kFreeroamSettleMs;
+    }
+
     static DWORD WINAPI ThreadProc(LPVOID) {
         bool latched = false, haveLast = false;
 #ifdef _DEBUG
@@ -61,6 +79,7 @@ namespace Mod::Trigger {
 #endif
         float last[3] = {};
         ULONGLONG lastSampleMs = 0, lastHitMs = 0;
+        ULONGLONG freeroamSinceMs = 0;
 
         while (!g_stop.load(std::memory_order_relaxed)) {
             Sleep(kPollMs);
@@ -72,15 +91,17 @@ namespace Mod::Trigger {
             wasF7 = f7;
 #endif
             if (!Options::Armed()) { haveLast = false; latched = false; continue; }
+            if (!FreeroamSettled(GetTickCount64(), freeroamSinceMs)) { haveLast = false; latched = false; continue; }
 
             ULONGLONG now = GetTickCount64();
             float dist = 0.0f;
+            if (ReadU32Or(Addr(Ida::Fsm), 0xFFFFFFFF) != kFsmFreeroam) continue;
             if (!NearestCopDistance(dist)) continue;
             if (dist <= 0.0f) { latched = false; continue; }
 
             float v[3];
             bool jolt = false;
-            if (PlayerVelocity(v)) {
+            if (ReadU32Or(Addr(Ida::Fsm), 0xFFFFFFFF) == kFsmFreeroam && PlayerVelocity(v)) {
                 float speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
                 if (haveLast && now > lastSampleMs && now - lastSampleMs < 1000) {
                     float lastSpeed = std::sqrt(last[0] * last[0] + last[1] * last[1] + last[2] * last[2]);

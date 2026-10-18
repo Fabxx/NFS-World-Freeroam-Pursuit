@@ -10,6 +10,12 @@
 // (es. arresto) si riparte da li'. I tempi si cambiano con righe "level <n> <secondi>" in
 // NFSWorldPursuitProbe_heattimer.txt; "maxlevel <n>" limita il livello massimo (default 10).
 //
+// Calore salvato PER AUTO (feature "heatkeep"): l'inseguimento riparte dal calore raggiunto l'ultima volta con
+// la stessa auto. L'auto in uso viene letta dai file del server offline (ServerCar: DefaultOwnedCarIndex e Id in
+// carslots.xml); il calore di ogni auto e' salvato in NFSWorldPursuitProbe_heat.txt (righe "<id auto> <calore>").
+// Per un'auto mai inseguita vale il calore salvato dal server (OwnedCarTrans/Heat); se l'auto non si puo'
+// determinare si usa solo il calore del gioco, mai quello di un'altra auto.
+//
 // L'indicatore del calore si riempie in base al tempo trascorso nel livello (calore = livello + frazione),
 // feature "heatfill" (attiva di default; disattivandola il calore resta fermo sull'intero come prima).
 //
@@ -20,10 +26,12 @@
 #include "Game.h"
 #include "Features.h"
 #include "Log.h"
+#include "ServerCar.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <map>
 
 namespace Mod::HeatTimer {
     constexpr uint32_t kPatchVa  = 0x48DFF4;   // dentro 0x48DF80, subito dopo la chiamata che riempie this+0x68..
@@ -45,23 +53,48 @@ namespace Mod::HeatTimer {
     static int g_maxLevel = 10;   // livello massimo raggiungibile ("maxlevel <n>")
     static int g_paceLevel = 0;
     static ULONGLONG g_paceStepMs = 0;
-    // ultimo calore raggiunto (livello + frazione): il prossimo inseguimento riparte da qui.
-    // Salvato anche su file (NFSWorldPursuitProbe_heat.txt) per ritrovarlo dopo un riavvio del gioco.
+    // ultimo calore raggiunto (livello + frazione) con l'auto dell'inseguimento in corso: il prossimo inseguimento
+    // con la stessa auto riparte da qui. Ogni auto ha il suo valore (g_carHeat, chiave = Id dell'auto posseduta),
+    // salvato anche su file (NFSWorldPursuitProbe_heat.txt) per ritrovarlo dopo un riavvio del gioco.
     static float g_savedHeat = 0.0f;
+    static std::string g_car;                       // auto dell'inseguimento in corso (vuoto = sconosciuta)
+    static std::map<std::string, float> g_carHeat;  // calore salvato per auto
     static ULONGLONG g_nextSaveMs = 0;
     static std::string SavePath() { return ModuleDir() + "NFSWorldPursuitProbe_heat.txt"; }
     static void WriteSaved() {
+        if (!g_car.empty()) g_carHeat[g_car] = g_savedHeat;
         FILE* f = nullptr;
         if (fopen_s(&f, SavePath().c_str(), "w") != 0 || !f) return;
-        fprintf(f, "%.4f\n", g_savedHeat);
+        for (const auto& kv : g_carHeat) fprintf(f, "%s %.4f\n", kv.first.c_str(), kv.second);
         fclose(f);
     }
     static void ReadSaved() {
         FILE* f = nullptr;
         if (fopen_s(&f, SavePath().c_str(), "r") != 0 || !f) return;
-        float v = 0.0f;
-        if (fscanf_s(f, "%f", &v) == 1 && v >= 1.0f && v <= static_cast<float>(kMaxLevel)) g_savedHeat = v;
+        char line[128];
+        while (fgets(line, sizeof(line), f)) {
+            char id[64] = {};
+            float v = 0.0f;
+            // il vecchio formato (un solo numero, calore comune a tutte le auto) viene ignorato
+            if (sscanf_s(line, "%63s %f", id, static_cast<unsigned>(sizeof(id)), &v) == 2 &&
+                v >= 1.0f && v <= static_cast<float>(kMaxLevel)) g_carHeat[id] = v;
+        }
         fclose(f);
+    }
+    // All'inizio dell'inseguimento: auto in uso e il suo calore salvato (0 = nessuno).
+    static void SelectCar() {
+        ServerCar::Info car = ServerCar::Current();
+        g_car = car.ok ? car.id : std::string();
+        g_savedHeat = 0.0f;
+        if (g_car.empty()) {
+            LOG("[heattimer] auto in uso sconosciuta: si usa solo il calore del gioco");
+            return;
+        }
+        auto it = g_carHeat.find(g_car);
+        if (it != g_carHeat.end()) g_savedHeat = it->second;
+        else if (car.heat >= 1.0f) g_savedHeat = car.heat > static_cast<float>(kMaxLevel) ? static_cast<float>(kMaxLevel) : car.heat;
+        LOG("[heattimer] auto %s (%s): calore salvato %.3f (%s)", g_car.c_str(), car.name.c_str(), g_savedHeat,
+            it != g_carHeat.end() ? "ultimo inseguimento con questa auto" : "server");
     }
 
     // stato del calcolo
@@ -123,7 +156,7 @@ namespace Mod::HeatTimer {
         g_pacing = Features::On("heatpacing");
         LoadConfig();
         ReadSaved();
-        LOG("[heattimer] calore salvato all'avvio: %.3f", g_savedHeat);
+        LOG("[heattimer] calore salvato per %u auto", static_cast<unsigned>(g_carHeat.size()));
         LOG("[heattimer] ritmo del calore della beta: %s", g_pacing ? "ON" : "OFF");
         uint8_t* p = reinterpret_cast<uint8_t*>(Addr(kPatchVa));
         if (memcmp(p, kOriginal, sizeof(kOriginal)) != 0) {
@@ -144,7 +177,7 @@ namespace Mod::HeatTimer {
     void ResetSaved(float heat) {
         g_savedHeat = heat;
         WriteSaved();
-        LOG("[heattimer] calore salvato azzerato a %.2f", heat);
+        LOG("[heattimer] calore salvato dell'auto %s azzerato a %.2f", g_car.empty() ? "(sconosciuta)" : g_car.c_str(), heat);
     }
 
     void Remove() {
@@ -176,9 +209,13 @@ namespace Mod::HeatTimer {
         int gameLevel = static_cast<int>(std::floor(heat + 0.0001f));
         if (gameLevel < 1) gameLevel = 1;
         if (g_paceLevel == 0) {
-            // riparte dal calore salvato alla fine dell'inseguimento precedente (se il gioco non e' gia' piu' in alto)
+            // riparte dal calore salvato per QUESTA auto (mai da quello di un'altra auto)
             float start = heat;
-            if (Features::On("heatkeep") && g_savedHeat > start) start = g_savedHeat;
+            if (Features::On("heatkeep")) {
+                SelectCar();
+                if (!g_car.empty() && g_savedHeat >= 1.0f) start = g_savedHeat;
+            }
+            else g_car.clear();
             int lv = static_cast<int>(std::floor(start + 0.0001f));
             if (lv < 1) lv = 1;
             if (lv > g_maxLevel) lv = g_maxLevel;
@@ -230,7 +267,11 @@ namespace Mod::HeatTimer {
     float Tick(ULONGLONG now, bool active, float heat, bool paused) {
         if (!g_patched) return -1.0f;
         if (!active || heat < 0.0f) {
-            if (g_wasActive) { LOG("[heattimer] fine inseguimento, calore salvato %.3f", g_savedHeat); WriteSaved(); }
+            if (g_wasActive) {
+                LOG("[heattimer] fine inseguimento, calore salvato %.3f per l'auto %s", g_savedHeat, g_car.empty() ? "(sconosciuta)" : g_car.c_str());
+                WriteSaved();
+                g_car.clear();
+            }
             g_wasActive = false;
             g_paceLevel = 0;
             g_lastTickMs = 0;
