@@ -454,7 +454,14 @@ namespace Mod::Pursuit {
     using InfractionSet_t = void(__thiscall*)(void*, int);
     static InfractionSet_t g_origInfractionSet = nullptr;
 
+    // Arresto o evasione: l'arresto e' possibile solo con l'auto (quasi) ferma, circondata dalla polizia.
+    // Se l'inseguimento finisce senza raffreddamento (es. powerup "raffreddamento istantaneo") mentre l'auto
+    // si muove, e' un'evasione.
+    constexpr float kBustMaxSpeed = 5.0f;               // m/s (18 km/h)
+    static float g_lastSpeed = -1.0f;                   // ultima velocita' letta durante l'inseguimento (-1 = mai)
+
     static void ResetExtraStats() {
+        g_lastSpeed = -1.0f;
         g_statTopSpeed = 0.0f;
         g_spikesDodged = 0;
         g_infractionMask = 0;
@@ -514,6 +521,7 @@ namespace Mod::Pursuit {
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { return; }
         const float s = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (s < 150.0f) g_lastSpeed = s;
         if (s > g_statTopSpeed && s < 150.0f) g_statTopSpeed = s;     // > 540 km/h = lettura non valida
     }
 
@@ -803,9 +811,12 @@ namespace Mod::Pursuit {
         }
         else if (g_sawAIPursuit && !g_resultsPhase) {
             if (!g_aiPursuitGoneMs) {
-                g_statBusted = !g_cooldown;
+                const bool moving = g_lastSpeed >= kBustMaxSpeed;
+                g_statBusted = !g_cooldown && !moving;
                 g_statHeat = PlayerHeat();
-                LOG("[pursuit] chase over: %s (heat %.2f)", g_statBusted ? "BUSTED" : "EVADED", g_statHeat);
+                LOG("[pursuit] chase over: %s (heat %.2f, cooldown %s, last speed %.1f km/h%s)", g_statBusted ? "BUSTED" : "EVADED",
+                    g_statHeat, g_cooldown ? "yes" : "no", g_lastSpeed * 3.6f,
+                    (!g_cooldown && moving) ? " -> ended without cooldown while moving: evaded (instant cooldown)" : "");
                 
                 if (g_statBusted) {
                      PlayerSetHeat(kMinHeat);
